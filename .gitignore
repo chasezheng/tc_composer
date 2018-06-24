@@ -1,3 +1,7 @@
+.idea/
+**/.ipynb
+**/.tex
+
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template
 # Byte-compiled / optimized / DLL files
@@ -7,7 +11,6 @@ __pycache__/
 
 # C extensions
 *.so
-.idea/
 # Distribution / packaging
 .Python
 build/
