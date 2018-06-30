@@ -1,7 +1,7 @@
 import typing
 from abc import ABCMeta, abstractmethod
 from collections import Counter
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, TypeVar
 
 import tensor_comprehensions as tc
 from torch.autograd import Variable
@@ -9,6 +9,7 @@ from torch.nn import Module
 
 from ..util import cached_property
 
+T = TypeVar('T')
 
 class Layer(Module, metaclass=ABCMeta):
     __NAMES: typing.Counter[str] = Counter()
@@ -22,15 +23,19 @@ class Layer(Module, metaclass=ABCMeta):
             name = name + str(Layer.__NAMES[name])
 
         assert name not in Layer.__NAMES
-        self.__id: str = name
+        self.__name: str = name
         Layer.__NAMES[name] += 1
 
     def __str__(self):
-        return self.__id.__str__()
+        return self.__name
 
     @property
-    def id(self):
-        return self.__id
+    def forward_name(self):
+        return self.__name
+
+    @property
+    def backward_name(self):
+        return '_'.join((self.__name, 'grad'))
 
     @property
     @abstractmethod
@@ -44,16 +49,17 @@ class Layer(Module, metaclass=ABCMeta):
     @cached_property
     def tc_unit(self) -> tc.TcUnit:
         if self.training:
-            return tc.TcUnit(self.lang, training=True, name=self.id, backward=self.id + '_grad',
+            return tc.TcUnit(self.lang, training=True, name=self.forward_name, backward=self.backward_name,
                              **self.tc_compile_kwargs)
         else:
-            return tc.TcUnit(self.lang, training=False, name=self.id, **self.tc_compile_kwargs)
+            return tc.TcUnit(self.lang, training=False, name=self.forward_name, **self.tc_compile_kwargs)
 
     @abstractmethod
     def forward(self, *args, outputs: Sequence[Variable] = None, **kwargs) -> None:
         pass
 
-    def train(self, mode=True) -> None:
+    def train(self: T, mode=True) -> T:
         super(Layer, self).train(mode)
         if 'tc_unit' in self.__dict__:
             del self.__dict__['tc_unit']
+        return self

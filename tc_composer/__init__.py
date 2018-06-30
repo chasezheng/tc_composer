@@ -1,3 +1,3 @@
-from . import setting
+from . import settings
 # Apply setting
-del setting
+del settings
