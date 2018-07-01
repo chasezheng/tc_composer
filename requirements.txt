@@ -1,3 +1,6 @@
-tensor-comprehensions==0.1.1
-torch==0.3.1.post3
 matplotlib==2.2.2
+numba==0.38.1
+numpy==1.14.5
+tensor-comprehensions==0.1.1
+torch==0.4.0
+torchvision==0.2.1
