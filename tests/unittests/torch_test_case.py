@@ -6,10 +6,10 @@ from typing import Union
 
 import numpy as np
 import torch
-from torch import DoubleTensor, FloatTensor, HalfTensor, LongTensor
+from torch.cuda import DoubleTensor, FloatTensor, HalfTensor, LongTensor
 from torch.autograd import Variable
 
-from tc_composer.settings import EPSILON, TYPE_NAME
+from tc_composer.settings import EPSILON, DEFAULT_TYPE
 
 AnyNumeric = Union[DoubleTensor, FloatTensor, HalfTensor, LongTensor, np.ndarray, Number, Variable]
 
@@ -20,9 +20,9 @@ class TorchTestCase(unittest.TestCase):
 
     def __init__(self, methodName=None):
         super(TorchTestCase, self).__init__(methodName=methodName)
-        if TYPE_NAME != 'double':
+        if DEFAULT_TYPE != 'double':
             self.logger.warning("Please set default type to `double` for testing. "
-                                f"Instead found: {TYPE_NAME}")
+                                f"Instead found: {DEFAULT_TYPE}")
 
     @staticmethod
     def to_numpy(n: AnyNumeric, clone: bool = False) -> np.ndarray:

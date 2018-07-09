@@ -18,25 +18,19 @@ class TestAffineTransform(TorchTestCase):
         tc_aff = AffineTransform(in_n=self.in_n, out_n=self.out_n)
         torch_aff = nn.Linear(self.in_n, self.out_n)
 
-        torch_aff.weight.data = tc_aff.weight.data.view_as(torch_aff.weight)
-        torch_aff.bias.data = tc_aff.bias.data.view_as(torch_aff.bias)
+        torch_aff.weight.data = tc_aff.params[0].data.view_as(torch_aff.weight)
+        torch_aff.bias.data = tc_aff.params[1].data.view_as(torch_aff.bias)
 
         tc_aff.recompile(self.input)
         self.assert_allclose(tc_aff(self.input).squeeze(), torch_aff(self.input).squeeze())
 
-        # One dimension vector
-        tc_aff.recompile(self.input[0])
-        self.assert_allclose(tc_aff(self.input[0].squeeze()).squeeze(), torch_aff(self.input[0].squeeze()).squeeze())
 
     def test_without_bias(self):
         tc_aff = AffineTransform(in_n=self.in_n, out_n=self.out_n, bias=False)
         torch_aff = nn.Linear(self.in_n, self.out_n, bias=False)
 
-        torch_aff.weight.data = tc_aff.weight.data.view_as(torch_aff.weight)
+        torch_aff.weight.data = tc_aff.params[0].data.view_as(torch_aff.weight)
 
         tc_aff.recompile(self.input)
         self.assert_allclose(tc_aff(self.input).squeeze(), torch_aff(self.input).squeeze())
 
-        # One dimension vector
-        tc_aff.recompile(self.input[0])
-        self.assert_allclose(tc_aff(self.input[0].squeeze()).squeeze(), torch_aff(self.input[0].squeeze()).squeeze())

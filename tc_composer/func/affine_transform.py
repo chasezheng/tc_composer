@@ -1,50 +1,43 @@
 import torch
-from torch.nn import Parameter
+from functools import lru_cache
 
 from .function_with_params import FunctionWithParams
-from ..settings import TYPE_NAME
-from torch import Tensor
-from typing import Sequence, Union
-import tensor_comprehensions as tc
-
+from ..unique_name import TensorName
 
 
 class AffineTransform(FunctionWithParams):
-    __slots__ = 'in_n', '_use_bias', 'weight', 'bias', '_params'
+    __slots__ = '_use_bias', 'in_n', 'out_n'
 
     def __init__(self, in_n: int, out_n: int, bias: bool = True):
-        super(AffineTransform, self).__init__()
+        in_name = TensorName(2, prefix='input')
+        out_name = TensorName(2, prefix='output')
+        in_name.sizes[1] = in_n
+        out_name.sizes[0] = in_name.sizes[0]
+        super(AffineTransform, self).__init__(in_names=[in_name], outs_to_keep=[out_name])
+
         self.in_n = in_n
+        self.out_n = out_n
         self._use_bias = bias
 
-        self.weight = Parameter(torch.randn(out_n, in_n))
-        self.bias = Parameter(torch.randn(out_n))
+    @property
+    @lru_cache(maxsize=None)
+    def named_params(self):
         if self._use_bias:
-            self._params = (self.weight, self.bias)
+            return TensorName.make_pair(sizes=(self.out_n, self.in_n), prefix='weight'), \
+                   TensorName.make_pair(sizes=(self.out_n,), prefix='bias')
         else:
-            self._params = (self.weight,)
-
-    def __call__(self, t: Tensor, outputs: Sequence[Tensor] = ()) -> Tensor:
-        return super(AffineTransform, self).__call__(t.view(-1, self.in_n), outputs=outputs)
+            return TensorName.make_pair(sizes=(self.out_n, self.in_n), prefix='weight'),
 
     @property
-    def params(self):
-        return self._params
+    def def_body(self) -> str:
+        input, = self.in_names
+        output, = self.outs_to_keep
+        weight, _ = self.named_params[0]
 
-    @property
-    def tc_def(self) -> str:
         if self._use_bias:
-            return (f"def affine_transform({TYPE_NAME}(batch_size, in_n) input,\n"
-                    f"                      {TYPE_NAME}(out_n, in_n) weight,\n"
-                    f"                      {TYPE_NAME}(out_n) bias) -> (output) {'{'}\n"
-                    "    output(b, n) +=! input(b, i) * weight(n, i)\n" +
-                    "    output(b, n) = output(b, n) + bias(n)\n"
-                    "}")
-        else:
-            return (f"def linear_transform({TYPE_NAME}(batch_size, in_n) input,\n"
-                    f"                      {TYPE_NAME}(out_n, in_n) weight) -> (output) {'{'}\n"
-                    "    output(b, n) +=! input(b, i) * weight(n, i)\n"
-                    "}")
+            bias, _ = self.named_params[1]
 
-    def recompile(self, inp: Tensor, option: tc.MappingOptions = None):
-        super(AffineTransform, self).recompile(inp.view(-1, self.in_n), option=option)
+            return (f"{output}(b, n) +=! {input}(b, i) * {weight}(n, i)\n"
+                    f"{output}(b, n) = {output}(b, n) + {bias}(n)")
+        else:
+            return f"{output}(b, n) +=! {input}(b, i) * {weight}(n, i)"

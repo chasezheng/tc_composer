@@ -1,14 +1,14 @@
 from typing import Tuple
 
 import torch
-from torch.nn import Parameter
-
+from functools import lru_cache
 from .function_with_params import FunctionWithParams
-from ..settings import TYPE_NAME
+from ..settings import DEFAULT_TYPE
+from ..unique_name import TensorName
 
 
 class Convolution(FunctionWithParams):  # todo dilation, different dimensions
-    __slots__ = '_params', 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias', 'weight', 'bias'
+    __slots__ = '_named_params', 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias'
 
     def __init__(self,
                  in_channels: int,
@@ -18,10 +18,19 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
                  padding: Tuple[int, int] = (0, 0),
                  groups: int = 1,
                  bias: bool = True):
-        super(Convolution, self).__init__()
         assert len(kernel_size) == len(padding) == len(stride), f"Found: len(kernel_size) == {len(kernel_size)}, " \
                                                                 f"len(padding) == {len(padding)}, " \
                                                                 f"len(stride) == {len(stride)}"
+
+        in_name = TensorName(dim=5, prefix='input', sizes='B G C H W'.split())
+        out_name = TensorName(dim=5, prefix='output', sizes='B G M OH OW'.split())
+        in_name.sizes[1] = out_name.sizes[1] = groups
+        in_name.sizes[2] = in_channels
+        out_name.sizes[0] = in_name.sizes[0]
+        out_name.sizes[2] = out_channels
+        out_name.sizes[3], out_name.sizes[4] = kernel_size
+
+        super(Convolution, self).__init__(in_names=[in_name], outs_to_keep=[out_name])
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -30,35 +39,47 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
         self.stride = stride
         self.groups = groups
         self.use_bias = bias
-        self.weight = Parameter(torch.normal(torch.zeros(groups, out_channels, in_channels, *kernel_size), .1))
-        self.bias = Parameter(torch.normal(torch.zeros(groups, out_channels), .1))
-        self._params = self.weight, self.bias
 
     @property
-    def params(self):
-        return self._params
+    @lru_cache(maxsize=None)
+    def named_params(self):
+        if self.use_bias:
+            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size), prefix='weight'), \
+                   TensorName.make_pair(sizes=(self.groups, self.out_channels), prefix='bias')
+        else:
+            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size), prefix='weight'),
 
     @property
-    def tc_def(self) -> str:
-        type_name = TYPE_NAME
+    def def_body(self) -> str:
+        input = self.in_names[0]
+        output = self.outs_to_keep[0]
+        weight, _ = self.named_params[0]
+        if self.use_bias:
+            bias, _ = self.named_params[1]
+        else:
+            bias = None
+
+        H, W = input.sizes[-2:]
+        KH, KW = weight.sizes[-2:]
 
         input_h_index = f"({self.stride[0]}*h + kh - {self.padding[0]})"
         input_w_index = f"({self.stride[1]}*w + kw - {self.padding[1]})"
-        output_h_constraint = f"h in 0:1+(H+{2*self.padding[0]}-KH)/{self.stride[0]}"
-        output_w_constraint = f"w in 0:1+(W+{2*self.padding[1]}-KW)/{self.stride[1]}"
+        output_h_constraint = f"h in 0:1+({H}+{2*self.padding[0]}-{KH})/{self.stride[0]}"
+        output_w_constraint = f"w in 0:1+({W}+{2*self.padding[1]}-{KW})/{self.stride[1]}"
 
         forward = (
-                f"def Convolution({type_name}(N, G, C, H, W) input,\n"
-                f"                        {type_name}(G, M, C, KH, KW) weight,\n"
-                f"                        {type_name}(G, M) bias) -> (output) {'{'}\n"
-                f"    output(n, g, m, h, w) +=! input(n, g, c, max(min({input_h_index}, H-1), 0), max(min({input_w_index}, W-1), 0)) * weight(g, m, c, kh, kw) \n"
-                f"                                  * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * (H - ({input_h_index}))))\n"  # Setting zero at the padding boundaries. 
-                f"                                  * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * (W - ({input_w_index}))))\n"
-                f"        where kh in 0:KH, kw in 0:KW,\n"
-                f"            {output_h_constraint}, {output_w_constraint}\n" +
-                (f"    output(n, g, m, h, w) = output(n, g, m, h, w) + bias(g, m)\n"
-                 f"         where {output_h_constraint}, {output_w_constraint}\n" if self.use_bias else '') +
-                "}")
+                f"{output}(n, g, m, h, w) +=! {input}(n, g, c, max(min({input_h_index}, {H}-1), 0), max(min({input_w_index}, {W}-1), 0)) * {weight}(g, m, c, kh, kw) \n"
+                f"                              * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * ({H} - ({input_h_index}))))\n"  # Setting zero at the padding boundaries. 
+                f"                              * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * ({W} - ({input_w_index}))))\n"
+                f"    where kh in 0:{KH}, kw in 0:{KW},\n"
+                f"        {output_h_constraint}, {output_w_constraint}\n" +
+                (f"{output}(n, g, m, h, w) = {output}(n, g, m, h, w) + {bias}(g, m)\n"
+                 f"     where {output_h_constraint}, {output_w_constraint}" if self.use_bias else ''))
+
+        return forward
+
+    def back(self):
+        type_name = DEFAULT_TYPE
 
         d_output_h_index = f"((h + {self.padding[0]})/{self.stride[0]} - kh)"
         d_output_w_index = f"((w + {self.padding[1]})/{self.stride[1]} - kw)"
@@ -87,4 +108,4 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
                 (f"    d_bias(g, m) +=! d_output(n, g, m, h, w)\n" if self.use_bias else
                  f"    d_bias(g, m) = 0 where exists bias(g, m)\n") +
                 "}")
-        return forward
+        return backward

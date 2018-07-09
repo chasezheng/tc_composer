@@ -29,8 +29,8 @@ class TestConv(TorchTestCase):
         tc_conv = Convolution(self.in_channels, self.out_channels, kernel_size=self.kernel_size)
         torch_conv = Conv2d(self.in_channels, self.out_channels, self.kernel_size)
 
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
-        torch_conv.bias.data.copy_(tc_conv.bias.data.view_as(torch_conv.bias))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
+        torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
         #tc_conv.train(False), torch_conv.train(False)
@@ -58,7 +58,7 @@ class TestConv(TorchTestCase):
         torch_conv = Conv2d(self.in_channels, self.out_channels, self.kernel_size, bias=False)
 
         # Their bias remain different
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
 
         tc_conv.recompile(self.tc_image)
         #tc_conv.train(False), torch_conv.train(False)
@@ -95,8 +95,8 @@ class TestConv(TorchTestCase):
         tc_conv = Convolution(self.in_channels, self.out_channels, kernel_size=self.kernel_size, groups=groups)
         torch_conv = Conv2d(self.in_channels * groups, out_channels=self.out_channels * groups,
                             kernel_size=self.kernel_size, groups=groups)
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
-        torch_conv.bias.data.copy_(tc_conv.bias.data.view_as(torch_conv.bias))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
+        torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(tc_image)
 
@@ -126,8 +126,8 @@ class TestConv(TorchTestCase):
                               stride=stride)
         torch_conv = Conv2d(self.in_channels, self.out_channels, self.kernel_size, stride=stride)
 
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
-        torch_conv.bias.data.copy_(tc_conv.bias.data.view_as(torch_conv.bias))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
+        torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
         #tc_conv.train(False), torch_conv.train(False)
@@ -157,8 +157,8 @@ class TestConv(TorchTestCase):
                               padding=padding)
         torch_conv = Conv2d(self.in_channels, self.out_channels, self.kernel_size, padding=padding)
 
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
-        torch_conv.bias.data.copy_(tc_conv.bias.data.view_as(torch_conv.bias))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
+        torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
         #tc_conv.train(False), torch_conv.train(False)
@@ -189,8 +189,8 @@ class TestConv(TorchTestCase):
         torch_conv = Conv2d(self.in_channels, self.out_channels, self.kernel_size, stride=stride,
                             padding=padding)
 
-        torch_conv.weight.data.copy_(tc_conv.weight.data.view_as(torch_conv.weight))
-        torch_conv.bias.data.copy_(tc_conv.bias.data.view_as(torch_conv.bias))
+        torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
+        torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
         #tc_conv.train(False), torch_conv.train(False)
