@@ -13,7 +13,9 @@ class AffineTransform(FunctionWithParams):
         out_name = TensorName(2, prefix='output')
         in_name.sizes[1] = in_n
         out_name.sizes[0] = in_name.sizes[0]
-        super(AffineTransform, self).__init__(in_names=[in_name], outs_to_keep=[out_name])
+        super(AffineTransform, self).__init__(
+            in_names=[in_name], outs_to_keep=[out_name], entry_point='affine' if bias else 'linear'
+        )
 
         self.in_n = in_n
         self.out_n = out_n

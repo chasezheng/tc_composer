@@ -9,8 +9,8 @@ class Activation(FunctionWithParams):
     def __init__(self, func: str):
         assert func.lower() in ('tanh', 'sigmoid', 'relu')
         super(Activation, self).__init__(
-            in_names=[TensorName(dim=1, type=DEFAULT_TYPE, prefix=f'input')],
-            outs_to_keep=[TensorName(dim=1, type=DEFAULT_TYPE, prefix=f'output')],
+            in_names=[TensorName(dim=2, type=DEFAULT_TYPE, sizes='B N'.split(), prefix=f'input')],
+            outs_to_keep=[TensorName(dim=2, type=DEFAULT_TYPE, sizes='B N'.split(), prefix=f'output')],
             entry_point=func
         )
         self._func = func.lower()
@@ -25,11 +25,11 @@ class Activation(FunctionWithParams):
         output, = self.outs_to_keep
 
         if self._func == 'tanh':
-            return f"{output}(i) = tanh({input}(i))"
+            return f"{output}(b, i) = tanh({input}(b, i))"
         elif self._func == 'sigmoid':
-            return f"{output}(i) = 1 / (1 + exp(-{input}(i)))"
+            return f"{output}(b, i) = 1 / (1 + exp(-{input}(b, i)))"
         elif self._func == 'relu':
-            return f"{output}(i) = fmax({input}(i), 0)"
+            return f"{output}(b, i) = fmax({input}(b, i), 0)"
         else:
             raise Exception(f"Unexpected func {self._func}")
 
@@ -55,7 +55,7 @@ class Softmax(FunctionWithParams):
     @property
     def def_body(self) -> str:
         input, = self.in_names
-        max_val, translated, l1norm, output = self.outs_to_keep
+        max_val, translated, l1norm, output = *self.outs_to_discard, *self.outs_to_keep
 
         return (f"{max_val}(n) max=! {input}(n, d)\n"
                 f"{translated}(n, d) = exp({input}(n, d) - {max_val}(n))\n"

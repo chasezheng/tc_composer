@@ -2,6 +2,7 @@ import multiprocessing
 import os
 from abc import ABCMeta, abstractmethod
 from functools import lru_cache
+from itertools import chain
 from typing import Sequence, Tuple
 
 import tensor_comprehensions as tc
@@ -42,7 +43,7 @@ class FunctionWithParams(metaclass=ABCMeta):
             def call(*inputs, outputs=(), mrun=run, params=self.params, entry_point=self.entry_point):
                 return mrun(entry_point, (*inputs, *params), outputs)
         else:
-            if len(self.outs_to_discard) + 1 == len(self.outs_to_keep):
+            if len(self.outs_to_keep) == 1:
                 def call(*inputs, outputs=(), mrun=run, params=self.params, entry_point=self.entry_point):
                     return mrun(entry_point, (*inputs, *params), outputs)[-1]
             else:
@@ -51,6 +52,23 @@ class FunctionWithParams(metaclass=ABCMeta):
                     return mrun(entry_point, (*inputs, *params), outputs)[discard_first_outs:]
 
         return call
+
+    def __lshift__(self, other):
+        """Return `self << other`. self precedes other
+        """
+        if isinstance(self, Composition) and isinstance(other, Composition):
+            return Composition(*self.funcs, *other.funcs)
+        elif isinstance(other, Composition):
+            return Composition(self, *other.funcs)
+        elif isinstance(self, Composition):
+            return Composition(*self.funcs, other)
+        else:
+            return Composition(self, other)
+
+    def __rshift__(self, other):
+        """Return `self >> other`. self follows other
+        """
+        return other.__lshift__(self)
 
     @property
     def entry_point(self):
@@ -72,6 +90,12 @@ class FunctionWithParams(metaclass=ABCMeta):
         pass
 
     @property
+    def option_file(self):
+        fname = '_'.join((self.entry_point,
+                          *cuda.get_current_device().name.decode('utf-8').split()))
+        return os.path.join(OPTIONS_DIR, fname)
+
+    @property
     def params(self) -> Sequence[Tensor]:
         """A Sequence of pairs of names and tensors
         """
@@ -91,23 +115,9 @@ class FunctionWithParams(metaclass=ABCMeta):
                 self.def_body.replace('\n', '\n    ') +
                 "\n}")
 
-    #
-    # Helper methods for compiling and tuning
-    #
-    @property
-    def option_file(self):
-        fname = '_'.join((self.entry_point,
-                          *cuda.get_current_device().name.decode('utf-8').split()))
-        return os.path.join(OPTIONS_DIR, fname)
-
-    def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:
-        if self.compilation_cache is None:
-            self.compilation_cache = tc.CompilationCache(self.tc_def)
-
-        self.logger.info(f'''Compiling for input shape - {list(tuple(i.shape) for i in inputs)}.''')
-        self.compilation_cache.compile(
-            self.entry_point, (*inputs, *self.params),
-            option or self.get_options(*inputs))
+    @staticmethod
+    def compose(*funcs: 'FunctionWithParams', entry_point: str = None) -> 'Composition':
+        return Composition(*funcs, entry_point=entry_point)
 
     def get_options(self, *inputs: Tensor, error_if_empty: bool = False) -> tc.MappingOptions:
         inputs_and_params = (*inputs, *self.params)
@@ -123,6 +133,15 @@ class FunctionWithParams(metaclass=ABCMeta):
         else:
             self.logger.info(f'Option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
             return loaded[0]
+
+    def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:
+        if self.compilation_cache is None:
+            self.compilation_cache = tc.CompilationCache(self.tc_def)
+
+        self.logger.info(f'''Compiling for input shape - {list(tuple(i.shape) for i in inputs)}.''')
+        self.compilation_cache.compile(
+            self.entry_point, (*inputs, *self.params),
+            option or self.get_options(*inputs))
 
     def tune_options(
             self,
@@ -144,6 +163,46 @@ class FunctionWithParams(metaclass=ABCMeta):
             self.logger.info(f'Appending results to {self.option_file}')
 
         return tuner.tune(self.entry_point, inputs_and_params, start_option, tuner_config)
+
+
+class Composition(FunctionWithParams):
+    __slots__ = 'funcs',
+
+    def __init__(self, *funcs: FunctionWithParams, entry_point: str = None):
+        super(Composition, self).__init__(
+            in_names=funcs[0].in_names,
+            outs_to_keep=funcs[-1].outs_to_keep,
+            outs_to_discard=tuple(
+                chain(*(f.outs_to_discard for f in funcs), *(f.outs_to_keep for f in funcs[:-1]))),
+            entry_point=entry_point
+        )
+        for n, f in enumerate(funcs[1:]):
+            assert len(funcs[n].outs_to_keep) == len(f.in_names)  # todo err msg
+            for o, i in zip(funcs[n].outs_to_keep, f.in_names):
+                assert len(o.sizes) == len(i.sizes)  # todo err msg
+
+        self.funcs = funcs
+
+    @property
+    @lru_cache(maxsize=None)
+    def named_params(self):
+        # The order doesn't matter
+        return tuple(chain(*(f.named_params for f in self.funcs)))
+
+    @property
+    @lru_cache(maxsize=None)
+    def def_body(self):
+        def statement_yielder():
+            yield self.funcs[0].def_body + '\n'
+            for n, f in enumerate(self.funcs[1:]):
+                saved = f.in_names
+                try:
+                    f.in_names = self.funcs[n].outs_to_keep
+                    yield f.def_body + '\n'
+                finally:
+                    f.in_names = saved
+
+        return '\n'.join(statement_yielder())
 
 
 class OptionNotFound(Exception):

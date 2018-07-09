@@ -34,6 +34,8 @@ class TorchTestCase(unittest.TestCase):
             n = np.asarray(n)
         elif clone:
             n = n.copy()
+        if not isinstance(n, np.ndarray):
+            raise TypeError(f'Found type: {type(n)}')
         return n
 
     @property
