@@ -109,7 +109,7 @@ class TestComposition(TorchTestCase):
     def test_tc_def(self):
         self.assertIsNotNone(self.comp.tc_def)
         self.assertNotEqual(
-            self.comp.funcs[0].outs_to_keep, self.comp.funcs[1].in_names)
+            self.comp._funcs[0].outs_to_keep, self.comp._funcs[1].in_names)
 
     def test_lshift(self):
         lshift = self.affine0 << self.softmax << self.affine1 << self.relu

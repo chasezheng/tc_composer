@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 from abc import ABCMeta, abstractmethod
+from collections import abc
 from functools import lru_cache
 from itertools import chain
 from typing import Sequence, Tuple
@@ -56,7 +57,10 @@ class FunctionWithParams(metaclass=ABCMeta):
     def __lshift__(self, other):
         """Return `self << other`. self precedes other
         """
-        if isinstance(self, Composition) and isinstance(other, Composition):
+        # todo add cases where they are branches
+        if isinstance(other, abc.Collection):
+            return Composition(self, Branch(*other))
+        elif isinstance(self, Composition) and isinstance(other, Composition):
             return Composition(*self.funcs, *other.funcs)
         elif isinstance(other, Composition):
             return Composition(self, *other.funcs)
@@ -68,7 +72,16 @@ class FunctionWithParams(metaclass=ABCMeta):
     def __rshift__(self, other):
         """Return `self >> other`. self follows other
         """
-        return other.__lshift__(self)
+        if isinstance(other, tuple):
+            return Composition(Branch(*other), self)
+        elif isinstance(self, Composition) and isinstance(other, Composition):
+            return Composition(*other._funcs, *self.funcs)
+        elif isinstance(other, Composition):
+            return Composition(*other._funcs, self)
+        elif isinstance(self, Composition):
+            return Composition(other, *self.funcs)
+        else:
+            return Composition(other, self)
 
     @property
     def entry_point(self):
@@ -116,6 +129,10 @@ class FunctionWithParams(metaclass=ABCMeta):
                 "\n}")
 
     @staticmethod
+    def branch(*funcs: 'FunctionWithParams', entry_point: str = None) -> 'Branch':
+        return Branch(*funcs, entry_point=entry_point)
+
+    @staticmethod
     def compose(*funcs: 'FunctionWithParams', entry_point: str = None) -> 'Composition':
         return Composition(*funcs, entry_point=entry_point)
 
@@ -131,7 +148,8 @@ class FunctionWithParams(metaclass=ABCMeta):
             self.logger.warning('Initializing naive options.')
             return tc.MappingOptions('naive')
         else:
-            self.logger.info(f'Option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
+            self.logger.info(
+                f'Option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
             return loaded[0]
 
     def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:
@@ -166,7 +184,7 @@ class FunctionWithParams(metaclass=ABCMeta):
 
 
 class Composition(FunctionWithParams):
-    __slots__ = 'funcs',
+    __slots__ = '_funcs',
 
     def __init__(self, *funcs: FunctionWithParams, entry_point: str = None):
         super(Composition, self).__init__(
@@ -181,28 +199,64 @@ class Composition(FunctionWithParams):
             for o, i in zip(funcs[n].outs_to_keep, f.in_names):
                 assert len(o.sizes) == len(i.sizes)  # todo err msg
 
-        self.funcs = funcs
+        self._funcs: Sequence[FunctionWithParams] = funcs
 
     @property
-    @lru_cache(maxsize=None)
-    def named_params(self):
-        # The order doesn't matter
-        return tuple(chain(*(f.named_params for f in self.funcs)))
-
-    @property
-    @lru_cache(maxsize=None)
+    @lru_cache(maxsize=None)  # todo good idea to cache here?
     def def_body(self):
         def statement_yielder():
-            yield self.funcs[0].def_body + '\n'
-            for n, f in enumerate(self.funcs[1:]):
+            yield self._funcs[0].def_body + '\n'
+            for n, f in enumerate(self._funcs[1:]):
                 saved = f.in_names
                 try:
-                    f.in_names = self.funcs[n].outs_to_keep
+                    f.in_names = self._funcs[n].outs_to_keep
                     yield f.def_body + '\n'
                 finally:
                     f.in_names = saved
 
         return '\n'.join(statement_yielder())
+
+    @property
+    def funcs(self) -> Sequence[FunctionWithParams]:
+        return tuple(self._funcs)
+
+    @property
+    @lru_cache(maxsize=None)
+    def named_params(self):
+        # The order doesn't matter
+        return tuple(chain(*(f.named_params for f in self._funcs)))
+
+
+# todo test
+class Branch(FunctionWithParams):
+    __slots__ = '_funcs',
+
+    def __init__(self, *funcs: FunctionWithParams, entry_point: str = None):
+        super(Branch, self).__init__(
+            in_names=funcs[0].in_names,
+            outs_to_keep=tuple(chain(*(f.outs_to_keep for f in funcs))),
+            outs_to_discard=tuple(chain(*(f.outs_to_discard for f in funcs))),
+            entry_point=entry_point
+        )
+        self._funcs = funcs
+
+    @property
+    def def_body(self):
+        def statement_yielder():
+            for f in self._funcs:
+                save = f.in_names
+                try:
+                    f.in_names = self.in_names
+                    yield f.def_body + '\n'
+                finally:
+                    f.in_names = save
+
+        return '\n'.join(statement_yielder())
+
+    @property
+    def named_params(self):
+        # The order doesn't matter
+        return tuple(chain(*(f.named_params for f in self._funcs)))
 
 
 class OptionNotFound(Exception):

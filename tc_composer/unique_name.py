@@ -40,7 +40,7 @@ class TensorName(UniqueName):
     def __init__(self,
                  dim: int,
                  type: str = DEFAULT_TYPE,
-                 sizes: Sequence[Union[str, int]] = None,
+                 sizes: Sequence[Union[str, int, UniqueName]] = None,
                  prefix: str = 'T'):
         super(TensorName, self).__init__(prefix=prefix)
         if sizes is not None:
@@ -49,7 +49,7 @@ class TensorName(UniqueName):
         else:
             sizes = tuple('I' for _ in range(dim))
 
-        self.sizes: MutableSequence[Union[int, UniqueName]] = list(n if isinstance(n, int) else UniqueName(n) for n in sizes)
+        self.sizes: MutableSequence[Union[int, UniqueName]] = list(UniqueName(n) if isinstance(n, str) else n for n in sizes)
         self.type = type
 
     @property
@@ -57,6 +57,19 @@ class TensorName(UniqueName):
         sizes = tuple(str(v) for v in self.sizes)
 
         return f"{self.type}({','.join(sizes)}) {self._name}"
+
+    @property
+    def dim(self):
+        return len(self.sizes)
+
+    @dim.setter
+    def dim(self, v: int):
+        names = tuple(s for s in self.sizes if isinstance(s, UniqueName))[:v]
+        if len(names) < v:
+            names += tuple(UniqueName() for _ in range(v - len(names)))
+
+        assert len(names) == v  # Sanity check
+        self.sizes = v
 
     @staticmethod
     def new_from(tensor: Tensor, prefix: str = None):
