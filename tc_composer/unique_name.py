@@ -27,15 +27,18 @@ class UniqueName:
         self._name = name
         counts[name] += 1
 
-    def __str__(self):
-        return self._name
+    def __eq__(self, other):
+        return id(self) == id(other)    # todo test
 
     def __hash__(self):
         return self._name.__hash__()
 
+    def __str__(self):
+        return self._name
+
 
 class TensorName(UniqueName):
-    __slots__ = 'sizes', 'type', 'indices'
+    __slots__ = 'sizes', 'type'
 
     def __init__(self,
                  dim: int,
@@ -56,7 +59,7 @@ class TensorName(UniqueName):
     def arg(self):
         sizes = tuple(str(v) for v in self.sizes)
 
-        return f"{self.type}({','.join(sizes)}) {self._name}"
+        return f"{self.type}({', '.join(sizes)}) {self._name}"
 
     @property
     def dim(self):

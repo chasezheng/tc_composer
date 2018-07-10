@@ -6,13 +6,14 @@ from ..unique_name import TensorName
 class Activation(FunctionWithParams):
     __slots__ = '_func',
 
-    def __init__(self, func: str):
-        assert func.lower() in ('tanh', 'sigmoid', 'relu')
+    def __init__(self, in_n: int, func: str):
+        in_name = TensorName(dim=2, sizes=('batches', in_n), prefix=f'input')
         super(Activation, self).__init__(
-            in_names=[TensorName(dim=2, type=DEFAULT_TYPE, sizes='B N'.split(), prefix=f'input')],
-            outs_to_keep=[TensorName(dim=2, type=DEFAULT_TYPE, sizes='B N'.split(), prefix=f'output')],
-            entry_point=func
+            in_names=[in_name],
+            outs_to_keep=[TensorName(dim=2, sizes=in_name.sizes, prefix=f'output')],
+            entry_point=func.capitalize()
         )
+        assert func.lower() in ('tanh', 'sigmoid', 'relu')
         self._func = func.lower()
 
     @property
@@ -39,14 +40,14 @@ class Softmax(FunctionWithParams):
     """
     __slots__ = ()
 
-    def __init__(self):
+    def __init__(self, in_n: int):
+        in_name = TensorName(dim=2, sizes=('batch_size', in_n), prefix='input')
         super(Softmax, self).__init__(
-            in_names=[TensorName(dim=2, type=DEFAULT_TYPE, prefix='input')],
-            outs_to_keep=[TensorName(dim=2, type=DEFAULT_TYPE, prefix='output')],
-            outs_to_discard=[TensorName(dim=1, type=DEFAULT_TYPE, prefix='max_val'),
-                             TensorName(dim=2, type=DEFAULT_TYPE, prefix='translated'),
-                             TensorName(dim=1, type=DEFAULT_TYPE, prefix='l1norm')]
-        )
+            in_names=[in_name],
+            outs_to_keep=[TensorName(dim=2, sizes=in_name.sizes, prefix='input')],
+            outs_to_discard=[TensorName(dim=1, sizes=in_name.sizes[:1], prefix='max_val'),
+                             TensorName(dim=2, sizes=in_name.sizes, prefix='translated'),
+                             TensorName(dim=1, sizes=in_name.sizes[:1], prefix='l1norm')])
 
     @property
     def named_params(self):

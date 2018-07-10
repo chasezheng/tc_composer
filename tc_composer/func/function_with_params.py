@@ -16,7 +16,7 @@ from ..unique_name import TensorName
 
 
 class FunctionWithParams(metaclass=ABCMeta):
-    __slots__ = 'in_names', 'outs_to_keep', 'outs_to_discard', 'compilation_cache', '_entry_point'
+    __slots__ = 'in_names', 'outs_to_keep', 'outs_to_discard', 'compilation_cache', '_entry_point', '_chained'
 
     def __init__(self,
                  in_names: Sequence[TensorName],
@@ -57,10 +57,7 @@ class FunctionWithParams(metaclass=ABCMeta):
     def __lshift__(self, other):
         """Return `self << other`. self precedes other
         """
-        # todo add cases where they are branches
-        if isinstance(other, abc.Collection):
-            return Composition(self, Branch(*other))
-        elif isinstance(self, Composition) and isinstance(other, Composition):
+        if isinstance(self, Composition) and isinstance(other, Composition):
             return Composition(*self.funcs, *other.funcs)
         elif isinstance(other, Composition):
             return Composition(self, *other.funcs)
@@ -72,9 +69,7 @@ class FunctionWithParams(metaclass=ABCMeta):
     def __rshift__(self, other):
         """Return `self >> other`. self follows other
         """
-        if isinstance(other, tuple):
-            return Composition(Branch(*other), self)
-        elif isinstance(self, Composition) and isinstance(other, Composition):
+        if isinstance(self, Composition) and isinstance(other, Composition):
             return Composition(*other._funcs, *self.funcs)
         elif isinstance(other, Composition):
             return Composition(*other._funcs, self)
@@ -82,6 +77,22 @@ class FunctionWithParams(metaclass=ABCMeta):
             return Composition(other, *self.funcs)
         else:
             return Composition(other, self)
+
+    def __add__(self, other):
+        if isinstance(self, Branch) and isinstance(other, Branch):
+            return Branch(*self.funcs, *other.funcs)
+        elif isinstance(other, Branch):
+            return Branch(self, *other.funcs)
+        elif isinstance(self, Branch):
+            return Branch(*self.funcs, other)
+        else:
+            return Branch(self, other)
+
+    def __radd__(self, other):
+        if isinstance(other, FunctionWithParams):
+            return self.__add__(other)
+        else:
+            return self     # todo test
 
     @property
     def entry_point(self):
@@ -119,6 +130,7 @@ class FunctionWithParams(metaclass=ABCMeta):
         input_and_param_names: Sequence[TensorName] = (*self.in_names, *(n for n, _ in self.named_params))
 
         arg_list = ',\n    '.join(n.arg for n in input_and_param_names)
+        # todo format return list
         return_list = ', '.join(str(o) for o in (*self.outs_to_discard, *self.outs_to_keep))
 
         return (f"def {self.entry_point}(\n"
@@ -194,10 +206,17 @@ class Composition(FunctionWithParams):
                 chain(*(f.outs_to_discard for f in funcs), *(f.outs_to_keep for f in funcs[:-1]))),
             entry_point=entry_point
         )
+        assert len(set(funcs)) == len(funcs), 'Functions should be unique.'
+
         for n, f in enumerate(funcs[1:]):
-            assert len(funcs[n].outs_to_keep) == len(f.in_names)  # todo err msg
-            for o, i in zip(funcs[n].outs_to_keep, f.in_names):
-                assert len(o.sizes) == len(i.sizes)  # todo err msg
+            assert len(funcs[n].outs_to_keep) == len(f.in_names), \
+                f'{funcs[n].entry_point} gives {len(funcs[n].outs_to_keep)} outputs, ' \
+                f'where as {f.entry_point} takes {len(f.in_names)} inputs. (n = {n})'
+            for k, (o, i) in enumerate(zip(funcs[n].outs_to_keep, f.in_names)):
+                assert len(o.sizes) == len(i.sizes), \
+                    f'(k = {k}, ' \
+                    f'funcs[n] = {funcs[n].entry_point}, ' \
+                    f'f = {f.entry_point}))'
 
         self._funcs: Sequence[FunctionWithParams] = funcs
 
@@ -205,16 +224,16 @@ class Composition(FunctionWithParams):
     @lru_cache(maxsize=None)  # todo good idea to cache here?
     def def_body(self):
         def statement_yielder():
-            yield self._funcs[0].def_body + '\n'
+            yield self._funcs[0].def_body
             for n, f in enumerate(self._funcs[1:]):
                 saved = f.in_names
                 try:
                     f.in_names = self._funcs[n].outs_to_keep
-                    yield f.def_body + '\n'
+                    yield f.def_body
                 finally:
                     f.in_names = saved
 
-        return '\n'.join(statement_yielder())
+        return '\n\n'.join(statement_yielder())
 
     @property
     def funcs(self) -> Sequence[FunctionWithParams]:
@@ -238,6 +257,7 @@ class Branch(FunctionWithParams):
             outs_to_discard=tuple(chain(*(f.outs_to_discard for f in funcs))),
             entry_point=entry_point
         )
+        assert len(set(funcs)) == len(funcs), 'Functions should be unique.'
         self._funcs = funcs
 
     @property
@@ -247,11 +267,15 @@ class Branch(FunctionWithParams):
                 save = f.in_names
                 try:
                     f.in_names = self.in_names
-                    yield f.def_body + '\n'
+                    yield f.def_body
                 finally:
                     f.in_names = save
 
-        return '\n'.join(statement_yielder())
+        return '\n\n'.join(statement_yielder())
+
+    @property
+    def funcs(self) -> Sequence[FunctionWithParams]:
+        return tuple(self._funcs)
 
     @property
     def named_params(self):

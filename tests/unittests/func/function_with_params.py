@@ -3,11 +3,11 @@ import os
 import tensor_comprehensions as tc
 import torch
 from torch import nn
+
 from tc_composer.func.activation import Activation, Softmax
 from tc_composer.func.affine_transform import AffineTransform
-from tc_composer.func.function_with_params import OptionNotFound
+from tc_composer.func.function_with_params import Composition, Branch, OptionNotFound
 from ..torch_test_case import TorchTestCase
-from tc_composer.func.function_with_params import Composition
 
 
 class TestFuncWithParams(TorchTestCase):
@@ -16,8 +16,9 @@ class TestFuncWithParams(TorchTestCase):
             # Like a copy of the class
             pass
 
-        self.activation = TestActivation('tanh')
-        self.inp = torch.randn(1, 50)
+        in_n = 50
+        self.activation = TestActivation(in_n, 'tanh')
+        self.inp = torch.randn(1, in_n)
 
         if os.path.exists(self.activation.option_file):
             os.remove(self.activation.option_file)
@@ -85,12 +86,11 @@ class TestComposition(TorchTestCase):
         self.inp = torch.randn(batch_size, in_n)
 
         self.affine0 = AffineTransform(in_n=in_n, out_n=hidden)
-        self.softmax = Softmax()
+        self.softmax = Softmax(in_n=in_n)
         self.affine1 = AffineTransform(in_n=hidden, out_n=out_n)
-        self.relu = Activation('relu')
+        self.relu = Activation(in_n=in_n, func='relu')
 
         self.comp = Composition(self.affine0, self.softmax, self.affine1, self.relu)
-        self.logger.debug('--- Definition of comp ---\n' + self.comp.tc_def)
         self.torch = nn.Sequential(
             nn.Linear(in_features=in_n, out_features=hidden),
             nn.Softmax(dim=-1),
@@ -113,14 +113,94 @@ class TestComposition(TorchTestCase):
 
     def test_lshift(self):
         lshift = self.affine0 << self.softmax << self.affine1 << self.relu
-        self.logger.debug('--- Definition of lshift ---\n' + lshift.tc_def)
-
         lshift.recompile(self.inp)
-        self.assert_allclose(actual=lshift(self.inp),desired=self.torch(self.inp))
+        self.assert_allclose(actual=lshift(self.inp), desired=self.torch(self.inp))
 
     def test_rshift(self):
         rshift = self.relu >> self.affine1 >> self.softmax >> self.affine0
-        self.logger.debug('--- Definition of rshift ---\n' + rshift.tc_def)
-
         rshift.recompile(self.inp)
         self.assert_allclose(actual=rshift(self.inp), desired=self.torch(self.inp))
+
+    def test_nested(self):
+        lshift = self.affine0 << (self.softmax << self.affine1) << self.relu
+        lshift.recompile(self.inp)
+        self.assert_allclose(actual=lshift(self.inp), desired=self.torch(self.inp))
+
+    def test_error(self):
+        with self.assertRaises(AssertionError):
+            # Should pass in unique functions
+            Composition(self.affine0, self.affine0)
+
+
+class TestBranch(TorchTestCase):
+    def setUp(self):
+        batch_size = 2
+        in_n = 3
+        out_n0 = 5
+        out_n1 = 7
+
+        self.inp = torch.rand(batch_size, in_n)
+
+        self.softmax = Softmax(in_n)
+        self.nn_softmax = nn.Softmax(dim=-1)
+
+        self.affine0 = AffineTransform(in_n=in_n, out_n=out_n0)
+        self.affine1 = AffineTransform(in_n=in_n, out_n=out_n1)
+
+        self.torch0 = nn.Linear(in_features=in_n, out_features=out_n0)
+        self.torch1 = nn.Linear(in_features=in_n, out_features=out_n1)
+
+        for p, t in zip(self.torch0.parameters(), self.affine0.params):
+            p.data = t.detach().view_as(p)
+
+        for p, t in zip(self.torch1.parameters(), self.affine1.params):
+            p.data = t.detach().view_as(p)
+
+    def test_run(self):
+        branch = Branch(self.affine0, self.affine1)
+        branch.recompile(self.inp)
+        a, b = branch(self.inp)
+        self.assert_allclose(actual=a, desired=self.torch0(self.inp))
+        self.assert_allclose(actual=b, desired=self.torch1(self.inp))
+
+    def test_add(self):
+        added = self.affine0 + self.affine1
+        self.assertEqual(added.tc_def, Branch(self.affine0, self.affine1).tc_def)
+
+        added.recompile(self.inp)
+
+        a, b = added(self.inp)
+        self.assert_allclose(actual=a, desired=self.torch0(self.inp))
+        self.assert_allclose(actual=b, desired=self.torch1(self.inp))
+
+    def test_associativity(self):
+        added0 = (self.softmax + self.affine0) + self.affine1
+        added1 = self.softmax + (self.affine0 + self.affine1)
+        added0.recompile(self.inp)
+        added1.recompile(self.inp)
+
+        for x,y in zip(added0(self.inp), added1(self.inp)):
+            self.assert_allclose(actual=x, desired=y)
+
+    def test_commutivity(self):
+        added0 = self.affine0 + self.affine1
+        added1 = self.affine1 + self.affine0
+        added0.recompile(self.inp)
+        added1.recompile(self.inp)
+        a, b = added0(self.inp)
+        a1, b1 = reversed(added1(self.inp))
+        self.assert_allclose(actual=a1, desired=a)
+        self.assert_allclose(actual=b1, desired=b)
+
+    def test_compose_branch(self):
+        func = Composition(self.softmax, Branch(self.affine0, self.affine1))
+        func.recompile(self.inp)
+
+        a, b = func(self.inp)
+        self.assert_allclose(actual=a, desired=self.torch0(self.nn_softmax(self.inp)))
+        self.assert_allclose(actual=b, desired=self.torch1(self.nn_softmax(self.inp)))
+
+    def test_error(self):
+        with self.assertRaises(AssertionError):
+            # Should pass in unique functions
+            Branch(self.affine0, self.affine0)

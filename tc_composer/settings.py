@@ -37,6 +37,7 @@ CHECKING_SHAPE = False
 #
 if os.environ.get('UNIT_TESTING', None) == 'True':
     DEFAULT_TENSOR = 'torch.cuda.DoubleTensor'
+    CHECKING_SHAPE = True
 
 if os.environ.get('BENCHMARKING', None) == 'True':
     CHECKING_SHAPE = False
