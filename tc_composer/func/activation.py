@@ -1,64 +1,82 @@
+from functools import lru_cache
+from typing import Sequence
+
 from .function_with_params import FunctionWithParams
-from ..settings import DEFAULT_TYPE
 from ..unique_name import TensorName
 
 
 class Activation(FunctionWithParams):
-    __slots__ = '_func',
+    __slots__ = '_func', '_input_dim'
 
-    def __init__(self, in_n: int, func: str):
-        in_name = TensorName(dim=2, sizes=('batches', in_n), prefix=f'input')
-        super(Activation, self).__init__(
-            in_names=[in_name],
-            outs_to_keep=[TensorName(dim=2, sizes=in_name.sizes, prefix=f'output')],
-            entry_point=func.capitalize()
-        )
+    def __init__(self, func: str, input_dim: int = None):
+        super(Activation, self).__init__(entry_point=func.capitalize())
         assert func.lower() in ('tanh', 'sigmoid', 'relu')
         self._func = func.lower()
+        self._input_dim = input_dim
 
     @property
     def named_params(self):
         return ()
 
-    @property
-    def def_body(self) -> str:
-        input, = self.in_names
-        output, = self.outs_to_keep
+    @lru_cache(maxsize=None)
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        if in_names is None:
+            assert self._input_dim is not None, "We don't know the dimension of input."
+            input = TensorName(dim=self._input_dim, prefix='input')
+        else:
+            assert len(in_names) == 1
+            input = in_names[0]
+
+        output = TensorName(dim=input.dim, sizes=input.sizes, prefix='output')
+        indices = ', '.join(output.indices)
 
         if self._func == 'tanh':
-            return f"{output}(b, i) = tanh({input}(b, i))"
+            body = f"{output}({indices}) = tanh({input}({indices}))"
         elif self._func == 'sigmoid':
-            return f"{output}(b, i) = 1 / (1 + exp(-{input}(b, i)))"
+            body = f"{output}({indices}) = 1 / (1 + exp(-{input}({indices})))"
         elif self._func == 'relu':
-            return f"{output}(b, i) = fmax({input}(b, i), 0)"
+            body = f"{output}({indices}) = fmax({input}({indices}), 0)"
         else:
             raise Exception(f"Unexpected func {self._func}")
 
+        return body, (input,), (output,), ()
+
 
 class Softmax(FunctionWithParams):
-    """Perform softmax on dim=-1
-    """
-    __slots__ = ()
+    __slots__ = '_aggregation_dim', '_input_dim'
 
-    def __init__(self, in_n: int):
-        in_name = TensorName(dim=2, sizes=('batch_size', in_n), prefix='input')
-        super(Softmax, self).__init__(
-            in_names=[in_name],
-            outs_to_keep=[TensorName(dim=2, sizes=in_name.sizes, prefix='input')],
-            outs_to_discard=[TensorName(dim=1, sizes=in_name.sizes[:1], prefix='max_val'),
-                             TensorName(dim=2, sizes=in_name.sizes, prefix='translated'),
-                             TensorName(dim=1, sizes=in_name.sizes[:1], prefix='l1norm')])
+    def __init__(self,
+                 input_dim: int = None,
+                 aggregation_dim: int = -1,
+                 entry_point: str = None):
+        super(Softmax, self).__init__(entry_point=entry_point)
+        self._input_dim = input_dim
+        self._aggregation_dim = aggregation_dim
 
     @property
     def named_params(self):
         return ()
 
-    @property
-    def def_body(self) -> str:
-        input, = self.in_names
-        max_val, translated, l1norm, output = *self.outs_to_discard, *self.outs_to_keep
+    @lru_cache(maxsize=None)
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        if in_names is None:
+            assert self._input_dim is not None, "We don't know the dimension of input."
+            input = TensorName(dim=self._input_dim, prefix='input')
+        else:
+            assert len(in_names) == 1
+            input = in_names[0]
 
-        return (f"{max_val}(n) max=! {input}(n, d)\n"
-                f"{translated}(n, d) = exp({input}(n, d) - {max_val}(n))\n"
-                f"{l1norm}(n) +=! {translated}(n, d)\n"
-                f"{output}(n, d) = {translated}(n, d) / {l1norm}(n)")
+        dim = self._aggregation_dim % input.dim
+        reduced_sizes = tuple(s for n, s in enumerate(input.sizes) if n != dim)
+        max_val, translated, l1norm, output = TensorName(dim=input.dim - 1, sizes=reduced_sizes, prefix='max_val'), \
+                                              TensorName(dim=input.dim, sizes=input.sizes, prefix='translated'), \
+                                              TensorName(dim=input.dim - 1, sizes=reduced_sizes, prefix='l1norm'), \
+                                              TensorName(dim=input.dim, sizes=input.sizes, prefix='output')
+        indices = ', '.join(i for i in output.indices)
+        reduced_indices = ', '.join(s for n, s in enumerate(output.indices) if n != dim)
+        body = (f"{max_val}({reduced_indices}) max=! {input}({indices})\n"
+                f"{translated}({indices}) = exp({input}({indices}) - {max_val}({reduced_indices}))\n"
+                f"{l1norm}({reduced_indices}) +=! {translated}({indices})\n"
+                f"{output}({indices}) = {translated}({indices}) / {l1norm}({reduced_indices})")
+
+        return body, (input,), (output,), (max_val, translated, l1norm)

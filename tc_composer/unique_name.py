@@ -1,18 +1,22 @@
 from collections import Counter
-from typing import MutableSequence, Union, Sequence
+from typing import Union, Sequence
 
-from torch import Tensor
 import torch
+from torch import Tensor
+
 from .settings import DEFAULT_TYPE, tc_type
 
+INDEX_NAMES = ['b', 'i', 'j', 'k', 'l', 'm', 'n']
 
-class UniqueName:
-    __slots__ = '_name',
+
+class UniqueName(str):      # todo add a lot of tests
+    __slots__ = ()
 
     _COUNTS = Counter()
 
-    def __init__(self, prefix: str = None):
-        prefix = prefix or type(self).__name__[:1]
+    def __new__(cls, prefix: str = None):
+        assert prefix is None or isinstance(prefix, str)
+        prefix = prefix or cls.__name__[:1]
 
         counts = UniqueName._COUNTS
         if prefix in counts:
@@ -24,55 +28,150 @@ class UniqueName:
             name = prefix
 
         assert name not in counts
-        self._name = name
+        assert (name.lower() != name) or len(
+            name) > 1, f'Lower-case single letters are reserved for index variables.'
         counts[name] += 1
+        return super(UniqueName, cls).__new__(cls, name)
 
-    def __eq__(self, other):
-        return id(self) == id(other)    # todo test
+    def __init__(self, *args, **kwargs):
+        super(UniqueName, self).__init__()
 
-    def __hash__(self):
-        return self._name.__hash__()
+
+class Size(UniqueName):
+    __slots__ = '_num',
+
+    def __new__(cls, var: Union[int, str] = None):
+        if isinstance(var, str):
+            obj = super(Size, cls).__new__(cls, prefix=var)
+            obj._num: int = None
+        else:
+            obj = super(Size, cls).__new__(cls, prefix=None)
+            obj._num: int = var
+        return obj
 
     def __str__(self):
-        return self._name
+        if self._num is not None:
+            return str(self._num)
+        else:
+            return self
+
+    def __repr__(self):
+        return f'Size({self})'
+
+    @property
+    def num(self):
+        return self._num
+
+    @num.setter
+    def num(self, v):
+        assert self._num is None or self._num == v, f"Trying to reset the value of {''.join(self)}={self._num} to {v}"
+        self._num = v
+
+    def prod(self, *v: Union[str, int]) -> str:
+        multiplier = 1
+        for i in v:
+            if isinstance(i, int):
+                assert i > 0, f'i should be positive. Found {i}'
+                multiplier *= i
+
+        remaining = [i for i in v if not isinstance(i, int)]
+        if self._num is not None:
+            out = str(self._num * multiplier)
+        else:
+            out = self
+            if multiplier > 1:
+                remaining.append(str(multiplier))
+
+        for i in remaining:
+            out += f' * {i}'
+
+        return out
+
+    def add(self, *v: Union[str, int]) -> str:
+        summant = 1
+        for i in v:
+            if isinstance(i, int):
+                summant += i
+
+        remaining = [i for i in v if not isinstance(i, int)]
+        if self._num is not None:
+            out = str(self._num + summant)
+        else:
+            out = self
+            if summant > 1:
+                remaining.append(str(summant))
+
+        for i in remaining:
+            out += f' + {i}'
+
+        return out
+
+    def sub(self, *v: Union[str, int]) -> str:
+        sub_total = 0
+        for i in v:
+            if isinstance(i, int):
+                sub_total -= i
+
+        remaining = [i for i in v if not isinstance(i, int)]
+        if self._num is not None:
+            out = str(self._num + sub_total)
+        else:
+            out = self
+            if sub_total > 1:
+                remaining.append(str(sub_total))
+
+        for i in remaining:
+            out += f' - {i}'
+
+        return out
 
 
 class TensorName(UniqueName):
-    __slots__ = 'sizes', 'type'
+    __slots__ = '_sizes', '_type'
 
-    def __init__(self,
-                 dim: int,
-                 type: str = DEFAULT_TYPE,
-                 sizes: Sequence[Union[str, int, UniqueName]] = None,
-                 prefix: str = 'T'):
-        super(TensorName, self).__init__(prefix=prefix)
+    def __new__(cls,
+                dim: int,
+                type: str = DEFAULT_TYPE,
+                sizes: Sequence[Union[str, int]] = None,
+                prefix: str = 'T'):
+        obj = super(TensorName, cls).__new__(cls, prefix=prefix)
         if sizes is not None:
             assert not isinstance(sizes, str)
             assert len(sizes) == dim
         else:
-            sizes = tuple('I' for _ in range(dim))
+            sizes = tuple('S' for _ in range(dim))
 
-        self.sizes: MutableSequence[Union[int, UniqueName]] = list(UniqueName(n) if isinstance(n, str) else n for n in sizes)
-        self.type = type
+        obj._sizes: Sequence[Size] = tuple(v if isinstance(v, Size) else Size(v) for v in sizes)
+        obj._type = type
+
+        return obj
 
     @property
     def arg(self):
-        sizes = tuple(str(v) for v in self.sizes)
-
-        return f"{self.type}({', '.join(sizes)}) {self._name}"
+        return f"{self._type}({', '.join(str(s) for s in self._sizes)}) {self}"
 
     @property
     def dim(self):
-        return len(self.sizes)
+        return len(self._sizes)
 
-    @dim.setter
-    def dim(self, v: int):
-        names = tuple(s for s in self.sizes if isinstance(s, UniqueName))[:v]
-        if len(names) < v:
-            names += tuple(UniqueName() for _ in range(v - len(names)))
+    @property
+    def indices(self) -> Sequence[str]:
+        indices = INDEX_NAMES[:self.dim]
+        if len(indices) < self.dim:
+            indices += tuple(indices[-1] + str(i) for i in range(self.dim - len(indices)))
 
-        assert len(names) == v  # Sanity check
-        self.sizes = v
+        # Sanity checks
+        assert len(indices) == self.dim
+        assert len(set(indices)) == self.dim
+        return indices
+
+    @property
+    def sizes(self) -> Sequence[Size]:
+        return self._sizes
+
+    @property
+    def type(self):
+        return self._type
 
     @staticmethod
     def new_from(tensor: Tensor, prefix: str = None):
@@ -82,4 +181,3 @@ class TensorName(UniqueName):
     def make_pair(sizes: Sequence[int], prefix: str = None):
         return TensorName(dim=len(sizes), type=DEFAULT_TYPE, sizes=sizes, prefix=prefix), \
                torch.rand(*sizes)
-

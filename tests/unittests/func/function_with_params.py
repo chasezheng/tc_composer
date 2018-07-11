@@ -17,7 +17,7 @@ class TestFuncWithParams(TorchTestCase):
             pass
 
         in_n = 50
-        self.activation = TestActivation(in_n, 'tanh')
+        self.activation = TestActivation('tanh', input_dim=2)
         self.inp = torch.randn(1, in_n)
 
         if os.path.exists(self.activation.option_file):
@@ -86,9 +86,9 @@ class TestComposition(TorchTestCase):
         self.inp = torch.randn(batch_size, in_n)
 
         self.affine0 = AffineTransform(in_n=in_n, out_n=hidden)
-        self.softmax = Softmax(in_n=in_n)
+        self.softmax = Softmax(input_dim=2)
         self.affine1 = AffineTransform(in_n=hidden, out_n=out_n)
-        self.relu = Activation(in_n=in_n, func='relu')
+        self.relu = Activation(input_dim=2, func='relu')
 
         self.comp = Composition(self.affine0, self.softmax, self.affine1, self.relu)
         self.torch = nn.Sequential(
@@ -107,9 +107,7 @@ class TestComposition(TorchTestCase):
             desired=self.torch(self.inp))
 
     def test_tc_def(self):
-        self.assertIsNotNone(self.comp.tc_def)
-        self.assertNotEqual(
-            self.comp._funcs[0].outs_to_keep, self.comp._funcs[1].in_names)
+        self.assertIsNotNone(self.comp.tc_def(self.inp))
 
     def test_lshift(self):
         lshift = self.affine0 << self.softmax << self.affine1 << self.relu
@@ -141,7 +139,7 @@ class TestBranch(TorchTestCase):
 
         self.inp = torch.rand(batch_size, in_n)
 
-        self.softmax = Softmax(in_n)
+        self.softmax = Softmax(input_dim=2)
         self.nn_softmax = nn.Softmax(dim=-1)
 
         self.affine0 = AffineTransform(in_n=in_n, out_n=out_n0)
@@ -165,7 +163,6 @@ class TestBranch(TorchTestCase):
 
     def test_add(self):
         added = self.affine0 + self.affine1
-        self.assertEqual(added.tc_def, Branch(self.affine0, self.affine1).tc_def)
 
         added.recompile(self.inp)
 
@@ -194,6 +191,7 @@ class TestBranch(TorchTestCase):
 
     def test_compose_branch(self):
         func = Composition(self.softmax, Branch(self.affine0, self.affine1))
+        self.logger.info(func.tc_def(self.inp))
         func.recompile(self.inp)
 
         a, b = func(self.inp)
