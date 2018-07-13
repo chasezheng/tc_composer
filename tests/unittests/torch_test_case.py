@@ -6,10 +6,10 @@ from typing import Union
 
 import numpy as np
 import torch
-from torch import DoubleTensor, FloatTensor, HalfTensor, LongTensor
+from torch.cuda import DoubleTensor, FloatTensor, HalfTensor, LongTensor
 from torch.autograd import Variable
 
-from tc_composer.settings import EPSILON, TYPE_NAME
+from tc_composer.settings import EPSILON, DEFAULT_TYPE, get_configured_logger
 
 AnyNumeric = Union[DoubleTensor, FloatTensor, HalfTensor, LongTensor, np.ndarray, Number, Variable]
 
@@ -20,9 +20,9 @@ class TorchTestCase(unittest.TestCase):
 
     def __init__(self, methodName=None):
         super(TorchTestCase, self).__init__(methodName=methodName)
-        if TYPE_NAME != 'double':
+        if DEFAULT_TYPE != 'double':
             self.logger.warning("Please set default type to `double` for testing. "
-                                f"Instead found: {TYPE_NAME}")
+                                f"Instead found: {DEFAULT_TYPE}")
 
     @staticmethod
     def to_numpy(n: AnyNumeric, clone: bool = False) -> np.ndarray:
@@ -34,12 +34,20 @@ class TorchTestCase(unittest.TestCase):
             n = np.asarray(n)
         elif clone:
             n = n.copy()
+        if not isinstance(n, np.ndarray):
+            raise TypeError(f'Found type: {type(n)}')
         return n
 
     @property
     @lru_cache(maxsize=None)
     def logger(self):
-        logger = logging.getLogger(type(self).__module__)
+        logger = logging.getLogger(type(self).__name__)
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(('[%(levelname)s] %(name)s.%(funcName)s - %(message)s')))
+        handler.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
         return logger
 
     def assert_allclose(self, actual: AnyNumeric, desired: AnyNumeric,
@@ -53,8 +61,12 @@ class TorchTestCase(unittest.TestCase):
 
         if actual.shape == desired.shape:
             self.logger.info(f"Max Absolute difference: {(actual - desired).max()}")
-            self.logger.info(
-                f"Max relative difference: {np.divide((actual - desired), desired).max()}")
+            try:
+                current_setting = np.seterr(divide='ignore', invalid='ignore')
+                self.logger.info(
+                    f"Max relative difference: {np.divide((actual - desired), desired).max()}")
+            finally:
+                np.seterr(**current_setting)
 
         np.testing.assert_allclose(actual, desired,
                                    rtol, atol,

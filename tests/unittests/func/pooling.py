@@ -10,9 +10,9 @@ class TestPooling(TorchTestCase):
     def setUp(self):
         self.stride = (2, 3)
         self.kernel_size = (5, 7)
-        self.in_channels = 11
+        self.in_channels = 3
         self.image_size = (13, 17)
-        self.batch_size = 19
+        self.batch_size = 2
 
     def test_max_pooling(self):
         tc_max_pooling = MaxPooling(stride=self.stride, kernel_size=self.kernel_size)

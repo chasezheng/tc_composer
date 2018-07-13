@@ -1,66 +1,82 @@
+from functools import lru_cache
 from typing import Sequence
 
-import tensor_comprehensions as tc
-from torch import Tensor
-
 from .function_with_params import FunctionWithParams
-from ..settings import TYPE_NAME
+from ..unique_name import TensorName
 
 
 class Activation(FunctionWithParams):
-    def __init__(self, func: str):
-        super(Activation, self).__init__()
+    __slots__ = '_func', '_input_dim'
+
+    def __init__(self, func: str, input_dim: int = None):
+        super(Activation, self).__init__(entry_point=func.capitalize())
         assert func.lower() in ('tanh', 'sigmoid', 'relu')
         self._func = func.lower()
-
-    def __call__(self, t: Tensor, outputs: Sequence[Tensor] = ()) -> Tensor:
-        return super(Activation, self).__call__(t.view(-1), outputs=outputs).view_as(t)
+        self._input_dim = input_dim
 
     @property
-    def params(self):
+    def named_params(self):
         return ()
 
-    @property
-    def tc_def(self) -> str:
+    @lru_cache(maxsize=None)
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        if in_names is None:
+            assert self._input_dim is not None, "We don't know the dimension of input."
+            input = TensorName(dim=self._input_dim, prefix='input')
+        else:
+            assert len(in_names) == 1
+            input = in_names[0]
+
+        output = TensorName(dim=input.dim, sizes=input.sizes, prefix='output')
+        indices = ', '.join(output.indices)
 
         if self._func == 'tanh':
-            return (f"def activation({TYPE_NAME}(I) input) -> (output) {'{'}\n"
-                    f"    output(i) = tanh(input(i))\n"
-                    "}")
+            body = f"{output}({indices}) = tanh({input}({indices}))"
         elif self._func == 'sigmoid':
-            return (f"def sigmoid({TYPE_NAME}(I) input) -> (output) {'{'}\n"
-                    f"    output(i) = 1 / (1 + exp(-input(i)))\n"
-                    "}")
+            body = f"{output}({indices}) = 1 / (1 + exp(-{input}({indices})))"
         elif self._func == 'relu':
-            return (f"def relu({TYPE_NAME}(I) input) -> (output) {'{'}\n"
-                    "    output(i) = fmax(input(i), 0)\n"
-                    "}")
+            body = f"{output}({indices}) = fmax({input}({indices}), 0)"
         else:
             raise Exception(f"Unexpected func {self._func}")
 
-    def recompile(self, input: Tensor, option: tc.MappingOptions = None):
-        super(Activation, self).recompile(input.view(-1), option=option)
+        return body, (input,), (output,), ()
 
 
 class Softmax(FunctionWithParams):
-    """Perform softmax on dim=-1
-    """
+    __slots__ = '_aggregation_dim', '_input_dim'
 
-    def __init__(self):
-        super(Softmax, self).__init__()
+    def __init__(self,
+                 input_dim: int = None,
+                 aggregation_dim: int = -1,
+                 entry_point: str = None):
+        super(Softmax, self).__init__(entry_point=entry_point)
+        self._input_dim = input_dim
+        self._aggregation_dim = aggregation_dim
 
     @property
-    def params(self):
+    def named_params(self):
         return ()
 
-    @property
-    def tc_def(self) -> str:
-        return (f"def softmax({TYPE_NAME}(N, D) input) -> (output, maxVal, tmp, l1norm) {'{'}\n"
-                "   maxVal(n) max=! input(n, d)\n"
-                "   tmp(n, d) = exp(input(n, d) - maxVal(n))\n"
-                "   l1norm(n) +=! tmp(n, d)\n"
-                "   output(n, d) = tmp(n, d) / l1norm(n)\n"
-                "}")
+    @lru_cache(maxsize=None)
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        if in_names is None:
+            assert self._input_dim is not None, "We don't know the dimension of input."
+            input = TensorName(dim=self._input_dim, prefix='input')
+        else:
+            assert len(in_names) == 1
+            input = in_names[0]
 
-    def __call__(self, t: Tensor, outputs: Sequence[Tensor] = ()) -> Tensor:
-        return super(Softmax, self).__call__(t, outputs=outputs)[0]
+        dim = self._aggregation_dim % input.dim
+        reduced_sizes = tuple(s for n, s in enumerate(input.sizes) if n != dim)
+        max_val, translated, l1norm, output = TensorName(dim=input.dim - 1, sizes=reduced_sizes, prefix='max_val'), \
+                                              TensorName(dim=input.dim, sizes=input.sizes, prefix='translated'), \
+                                              TensorName(dim=input.dim - 1, sizes=reduced_sizes, prefix='l1norm'), \
+                                              TensorName(dim=input.dim, sizes=input.sizes, prefix='output')
+        indices = ', '.join(i for i in output.indices)
+        reduced_indices = ', '.join(s for n, s in enumerate(output.indices) if n != dim)
+        body = (f"{max_val}({reduced_indices}) max=! {input}({indices})\n"
+                f"{translated}({indices}) = exp({input}({indices}) - {max_val}({reduced_indices}))\n"
+                f"{l1norm}({reduced_indices}) +=! {translated}({indices})\n"
+                f"{output}({indices}) = {translated}({indices}) / {l1norm}({reduced_indices})")
+
+        return body, (input,), (output,), (max_val, translated, l1norm)

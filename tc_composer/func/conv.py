@@ -1,14 +1,14 @@
+from functools import lru_cache
+from typing import Sequence
 from typing import Tuple
 
-import torch
-from torch.nn import Parameter
-
 from .function_with_params import FunctionWithParams
-from ..settings import TYPE_NAME
+from ..settings import DEFAULT_TYPE
+from ..unique_name import TensorName
 
 
 class Convolution(FunctionWithParams):  # todo dilation, different dimensions
-    __slots__ = '_params', 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias', 'weight', 'bias'
+    __slots__ = '_named_params', 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias'
 
     def __init__(self,
                  in_channels: int,
@@ -17,8 +17,9 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
                  stride: Tuple[int, int] = (1, 1),
                  padding: Tuple[int, int] = (0, 0),
                  groups: int = 1,
-                 bias: bool = True):
-        super(Convolution, self).__init__()
+                 bias: bool = True,
+                 entry_point: str = None):
+        super(Convolution, self).__init__(entry_point=entry_point)
         assert len(kernel_size) == len(padding) == len(stride), f"Found: len(kernel_size) == {len(kernel_size)}, " \
                                                                 f"len(padding) == {len(padding)}, " \
                                                                 f"len(stride) == {len(stride)}"
@@ -30,35 +31,72 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
         self.stride = stride
         self.groups = groups
         self.use_bias = bias
-        self.weight = Parameter(torch.normal(torch.zeros(groups, out_channels, in_channels, *kernel_size), .1))
-        self.bias = Parameter(torch.normal(torch.zeros(groups, out_channels), .1))
-        self._params = self.weight, self.bias
 
     @property
-    def params(self):
-        return self._params
+    @lru_cache(maxsize=None)
+    def named_params(self):
+        if self.use_bias:
+            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
+                                        prefix='weight'), \
+                   TensorName.make_pair(sizes=(self.groups, self.out_channels), prefix='bias')
+        else:
+            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
+                                        prefix='weight'),
 
-    @property
-    def tc_def(self) -> str:
-        type_name = TYPE_NAME
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        assert in_names is None or len(in_names) == 1
+        if in_names is not None:
+            input = in_names[0]
+        else:
+            input = TensorName(dim=5, prefix='input', sizes=('B', self.groups, self.in_channels, 'H', 'W'))
 
-        input_h_index = f"({self.stride[0]}*h + kh - {self.padding[0]})"
-        input_w_index = f"({self.stride[1]}*w + kw - {self.padding[1]})"
-        output_h_constraint = f"h in 0:1+(H+{2*self.padding[0]}-KH)/{self.stride[0]}"
-        output_w_constraint = f"w in 0:1+(W+{2*self.padding[1]}-KW)/{self.stride[1]}"
+        input.sizes[1].num = self.groups
+        input.sizes[2].num = self.in_channels
+        output_sizes = (input.sizes[0], self.groups, self.out_channels, *self.kernel_size)
+        output = TensorName(dim=5, prefix='output', sizes=output_sizes)
+
+        if self.use_bias:
+            weight, _ = self.named_params[0]
+            bias, _ = self.named_params[1]
+        else:
+            weight, _ = self.named_params[0]
+            bias = None
+
+        H, W = input.sizes[-2:]
+        KH, KW = self.kernel_size
+
+        input_h_index = f"h + kh"
+        input_w_index = f"w + kw"
+        output_h_constraint = f"h in 0:{H.add(2*self.padding[0] - KH + self.stride[0] - 1)}"
+        output_w_constraint = f"w in 0:{W.add(2*self.padding[1] - KW + self.stride[1] - 1)}"
+
+        if self.padding[0] > 0:
+            input_h_index += f" - {self.padding[0]}"
+        if self.padding[1] > 0:
+            input_w_index += f" - {self.padding[1]}"
+        if self.stride[0] > 1:
+            input_h_index = f"{self.stride[0]}*" + input_h_index
+            output_h_constraint = f"({output_h_constraint})/{self.stride[0]}"
+        if self.stride[1] > 1:
+            input_w_index = f"{self.stride[1]}*" + input_w_index
+            output_w_constraint = f"({output_w_constraint})/{self.stride[1]}"
 
         forward = (
-                f"def Convolution({type_name}(N, G, C, H, W) input,\n"
-                f"                        {type_name}(G, M, C, KH, KW) weight,\n"
-                f"                        {type_name}(G, M) bias) -> (output) {'{'}\n"
-                f"    output(n, g, m, h, w) +=! input(n, g, c, max(min({input_h_index}, H-1), 0), max(min({input_w_index}, W-1), 0)) * weight(g, m, c, kh, kw) \n"
-                f"                                  * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * (H - ({input_h_index}))))\n"  # Setting zero at the padding boundaries. 
-                f"                                  * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * (W - ({input_w_index}))))\n"
-                f"        where kh in 0:KH, kw in 0:KW,\n"
-                f"            {output_h_constraint}, {output_w_constraint}\n" +
-                (f"    output(n, g, m, h, w) = output(n, g, m, h, w) + bias(g, m)\n"
-                 f"         where {output_h_constraint}, {output_w_constraint}\n" if self.use_bias else '') +
-                "}")
+                f"{output}(n, g, m, h, w) +=! {input}(n, g, c, " +
+                (f"max(min({input_h_index}, {H.sub(1)}), 0)" if self.padding[0] > 0 else input_h_index) + ', ' +
+                (f"max(min({input_w_index}, {W.sub(1)}), 0)" if self.padding[1] > 0 else input_w_index) +
+                f") "
+                f"* {weight}(g, m, c, kh, kw) \n" +
+                (f"                              * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * ({H} - ({input_h_index}))))\n" if self.padding[0] > 0 else '') +  # Setting zero at the padding boundaries.
+                (f"                              * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * ({W} - ({input_w_index}))))\n" if self.padding[1] > 0 else '') +
+                f"    where kh in 0:{KH}, kw in 0:{KW}, {output_h_constraint}, {output_w_constraint}\n" +
+                (f"{output}(n, g, m, h, w) = {output}(n, g, m, h, w) + {bias}(g, m)\n"
+                 f"     where {output_h_constraint}, {output_w_constraint}" if self.use_bias else ''))
+
+        return forward, (input,), (output,), ()
+
+    def back(self):
+        type_name = DEFAULT_TYPE
 
         d_output_h_index = f"((h + {self.padding[0]})/{self.stride[0]} - kh)"
         d_output_w_index = f"((w + {self.padding[1]})/{self.stride[1]} - kw)"
@@ -87,4 +125,4 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
                 (f"    d_bias(g, m) +=! d_output(n, g, m, h, w)\n" if self.use_bias else
                  f"    d_bias(g, m) = 0 where exists bias(g, m)\n") +
                 "}")
-        return forward
+        return backward
