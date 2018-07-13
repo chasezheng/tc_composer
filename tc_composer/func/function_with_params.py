@@ -1,7 +1,6 @@
 import multiprocessing
 import os
 from abc import ABCMeta, abstractmethod
-from collections import abc
 from functools import lru_cache
 from itertools import chain
 from typing import Sequence, Tuple
@@ -16,16 +15,9 @@ from ..unique_name import TensorName
 
 
 class FunctionWithParams(metaclass=ABCMeta):
-    __slots__ = 'in_names', 'outs_to_keep', 'outs_to_discard', 'compilation_cache', '_entry_point', '_chained'
+    __slots__ = 'compilation_cache', '_entry_point', 'funcs'
 
-    def __init__(self,
-                 in_names: Sequence[TensorName],
-                 outs_to_keep: Sequence[TensorName],
-                 outs_to_discard: Sequence[TensorName] = (),
-                 entry_point: str = None):
-        self.in_names: Sequence[TensorName] = tuple(in_names)
-        self.outs_to_keep: Sequence[TensorName] = tuple(outs_to_keep)
-        self.outs_to_discard = tuple(outs_to_discard)
+    def __init__(self, entry_point: str = None):
         self.compilation_cache: tc.CompilationCache = None
         self._entry_point = entry_point
 
@@ -35,21 +27,23 @@ class FunctionWithParams(metaclass=ABCMeta):
         if self.compilation_cache is None:
             raise Exception('Please call recompile first.')
 
+        body, in_names, outs_to_keep, outs_to_discard = self.def_components()
+
         if CHECKING_SHAPE:
             run = self.compilation_cache.run
         else:
             run = self.compilation_cache.unchecked_run
 
-        if self.outs_to_discard == ():
+        if outs_to_discard == ():
             def call(*inputs, outputs=(), mrun=run, params=self.params, entry_point=self.entry_point):
                 return mrun(entry_point, (*inputs, *params), outputs)
         else:
-            if len(self.outs_to_keep) == 1:
+            if len(outs_to_keep) == 1:
                 def call(*inputs, outputs=(), mrun=run, params=self.params, entry_point=self.entry_point):
                     return mrun(entry_point, (*inputs, *params), outputs)[-1]
             else:
                 def call(*inputs, outputs=(), mrun=run, params=self.params, entry_point=self.entry_point,
-                         discard_first_outs=len(self.outs_to_discard)):
+                         discard_first_outs=len(outs_to_discard)):
                     return mrun(entry_point, (*inputs, *params), outputs)[discard_first_outs:]
 
         return call
@@ -92,15 +86,19 @@ class FunctionWithParams(metaclass=ABCMeta):
         if isinstance(other, FunctionWithParams):
             return self.__add__(other)
         else:
-            return self     # todo test
+            return self  # todo test
 
     @property
     def entry_point(self):
         return self._entry_point or type(self).__name__
 
-    @property
     @abstractmethod
-    def def_body(self) -> str:
+    def def_components(self, in_names: Sequence[TensorName] = None) \
+            -> Tuple[str, Sequence[TensorName], Sequence[TensorName], Sequence[TensorName]]:
+        """
+        :param in_names: Names for inputs (optional)
+        :return: statement_string, in_names, outputs_to_keep, outputs_to_discard
+        """
         pass
 
     @property
@@ -121,37 +119,35 @@ class FunctionWithParams(metaclass=ABCMeta):
 
     @property
     def params(self) -> Sequence[Tensor]:
-        """A Sequence of pairs of names and tensors
+        """A Sequence of tensors
         """
         return tuple(p for _, p in self.named_params)
 
-    @property
-    def tc_def(self) -> str:
-        input_and_param_names: Sequence[TensorName] = (*self.in_names, *(n for n, _ in self.named_params))
+    def tc_def(self, *inputs: Tensor) -> str:
+        if inputs != ():
+            in_names = tuple(TensorName.new_from(inp, prefix='input') for inp in inputs)
+        else:
+            in_names = None
+        body, in_names, outs_to_keep, outs_to_discard = self.def_components(in_names)
+
+        input_and_param_names: Sequence[TensorName] = (*in_names, *(n for n, _ in self.named_params))
 
         arg_list = ',\n    '.join(n.arg for n in input_and_param_names)
-        # todo format return list
-        return_list = ', '.join(str(o) for o in (*self.outs_to_discard, *self.outs_to_keep))
+        return_list = ',\n    '.join(o.arg for o in (*outs_to_discard, *outs_to_keep))
 
         return (f"def {self.entry_point}(\n"
                 f"    {arg_list}\n"
-                f") -> ({return_list})\n"
+                f") -> (\n"
+                f"    {return_list}\n"
+                f")\n"
                 "{\n    " +
-                self.def_body.replace('\n', '\n    ') +
+                body.replace('\n', '\n    ') +
                 "\n}")
-
-    @staticmethod
-    def branch(*funcs: 'FunctionWithParams', entry_point: str = None) -> 'Branch':
-        return Branch(*funcs, entry_point=entry_point)
-
-    @staticmethod
-    def compose(*funcs: 'FunctionWithParams', entry_point: str = None) -> 'Composition':
-        return Composition(*funcs, entry_point=entry_point)
 
     def get_options(self, *inputs: Tensor, error_if_empty: bool = False) -> tc.MappingOptions:
         inputs_and_params = (*inputs, *self.params)
         cache = tc.MappingOptionsCache(self.option_file)
-        loaded = cache.load(self.tc_def, self.entry_point, inputs_and_params, 1)
+        loaded = cache.load(self.tc_def(*inputs), self.entry_point, inputs_and_params, 1)
         if len(loaded) == 0:
             msg = f'No option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.'
             if error_if_empty:
@@ -166,7 +162,7 @@ class FunctionWithParams(metaclass=ABCMeta):
 
     def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:
         if self.compilation_cache is None:
-            self.compilation_cache = tc.CompilationCache(self.tc_def)
+            self.compilation_cache = tc.CompilationCache(self.tc_def(*inputs))
 
         self.logger.info(f'''Compiling for input shape - {list(tuple(i.shape) for i in inputs)}.''')
         self.compilation_cache.compile(
@@ -187,7 +183,7 @@ class FunctionWithParams(metaclass=ABCMeta):
             self.logger.info(f'Loading start options from file - {self.option_file}')
             start_option = self.get_options(*inputs)
 
-        tuner = tc.Tuner(self.tc_def, self.option_file if save_result else '')
+        tuner = tc.Tuner(self.tc_def(*inputs), self.option_file if save_result else '')
 
         if save_result:
             self.logger.info(f'Appending results to {self.option_file}')
@@ -199,41 +195,33 @@ class Composition(FunctionWithParams):
     __slots__ = '_funcs',
 
     def __init__(self, *funcs: FunctionWithParams, entry_point: str = None):
-        super(Composition, self).__init__(
-            in_names=funcs[0].in_names,
-            outs_to_keep=funcs[-1].outs_to_keep,
-            outs_to_discard=tuple(
-                chain(*(f.outs_to_discard for f in funcs), *(f.outs_to_keep for f in funcs[:-1]))),
-            entry_point=entry_point
-        )
+        super(Composition, self).__init__(entry_point=entry_point)
         assert len(set(funcs)) == len(funcs), 'Functions should be unique.'
-
-        for n, f in enumerate(funcs[1:]):
-            assert len(funcs[n].outs_to_keep) == len(f.in_names), \
-                f'{funcs[n].entry_point} gives {len(funcs[n].outs_to_keep)} outputs, ' \
-                f'where as {f.entry_point} takes {len(f.in_names)} inputs. (n = {n})'
-            for k, (o, i) in enumerate(zip(funcs[n].outs_to_keep, f.in_names)):
-                assert len(o.sizes) == len(i.sizes), \
-                    f'(k = {k}, ' \
-                    f'funcs[n] = {funcs[n].entry_point}, ' \
-                    f'f = {f.entry_point}))'
-
         self._funcs: Sequence[FunctionWithParams] = funcs
 
-    @property
-    @lru_cache(maxsize=None)  # todo good idea to cache here?
-    def def_body(self):
-        def statement_yielder():
-            yield self._funcs[0].def_body
-            for n, f in enumerate(self._funcs[1:]):
-                saved = f.in_names
-                try:
-                    f.in_names = self._funcs[n].outs_to_keep
-                    yield f.def_body
-                finally:
-                    f.in_names = saved
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        in_names = in_names or self._funcs[0].def_components()[1]
 
-        return '\n\n'.join(statement_yielder())
+        def components_yielder():
+            last_outs_to_keep = in_names
+
+            for n, f in enumerate(self._funcs[:-1]):
+                try:
+                    body, _, outs_to_keep, outs_to_discard = f.def_components(in_names=last_outs_to_keep)
+                    yield body, (), (), (*outs_to_keep, *outs_to_discard)
+                    last_outs_to_keep = outs_to_keep
+                except:
+                    self.logger.error(f'n = {n}, f = {f.entry_point}')
+                    raise
+
+            yield self._funcs[-1].def_components(in_names=last_outs_to_keep)
+
+        results = tuple(components_yielder())
+        body = '\n\n'.join(s for s, _, _, _ in results)
+        outs_to_keep = results[-1][-2]
+        outs_to_discard = tuple(chain(*(n for _, _, _, n in results)))
+
+        return body, in_names, outs_to_keep, outs_to_discard
 
     @property
     def funcs(self) -> Sequence[FunctionWithParams]:
@@ -243,35 +231,34 @@ class Composition(FunctionWithParams):
     @lru_cache(maxsize=None)
     def named_params(self):
         # The order doesn't matter
-        return tuple(chain(*(f.named_params for f in self._funcs)))
+        return tuple(dict(chain(*(f.named_params for f in self._funcs))).items())
 
 
-# todo test
 class Branch(FunctionWithParams):
     __slots__ = '_funcs',
 
     def __init__(self, *funcs: FunctionWithParams, entry_point: str = None):
-        super(Branch, self).__init__(
-            in_names=funcs[0].in_names,
-            outs_to_keep=tuple(chain(*(f.outs_to_keep for f in funcs))),
-            outs_to_discard=tuple(chain(*(f.outs_to_discard for f in funcs))),
-            entry_point=entry_point
-        )
+        super(Branch, self).__init__(entry_point=entry_point)
         assert len(set(funcs)) == len(funcs), 'Functions should be unique.'
         self._funcs = funcs
 
-    @property
-    def def_body(self):
-        def statement_yielder():
-            for f in self._funcs:
-                save = f.in_names
-                try:
-                    f.in_names = self.in_names
-                    yield f.def_body
-                finally:
-                    f.in_names = save
+    def def_components(self, in_names: Sequence[TensorName] = None):
+        in_names = in_names or self._funcs[0].def_components()[1]
 
-        return '\n\n'.join(statement_yielder())
+        def components_yielder():
+            for n, f in enumerate(self._funcs):
+                try:
+                    yield f.def_components(in_names=in_names)
+                except:
+                    self.logger.error(f'n = {n}, f = {f.entry_point}')  # todo implement and use repr
+                    raise
+
+        results = tuple(components_yielder())
+        body = '\n\n'.join(s for s, _, _, _ in results)
+        outs_to_keep = tuple(chain(*(n for _, _, n, _ in results)))
+        outs_to_discard = tuple(chain(*(n for _, _, _, n in results)))
+
+        return body, in_names, outs_to_keep, outs_to_discard
 
     @property
     def funcs(self) -> Sequence[FunctionWithParams]:
@@ -280,7 +267,7 @@ class Branch(FunctionWithParams):
     @property
     def named_params(self):
         # The order doesn't matter
-        return tuple(chain(*(f.named_params for f in self._funcs)))
+        return tuple(dict(chain(*(f.named_params for f in self._funcs))).items())
 
 
 class OptionNotFound(Exception):

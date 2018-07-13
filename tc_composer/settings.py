@@ -59,6 +59,7 @@ LOGGER.info(f'Saving compiled options in: {OPTIONS_DIR}')
 def tc_type(t: Union[str, Tensor]) -> str:
     """Converts torch tensor type to TC type name
     """
+    import torch
     if isinstance(t, str):
         # todo use regex and raise exception for not finding match
         return t.split('.')[-1].replace('Tensor', '').lower()
