@@ -67,8 +67,6 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
 
         input_h_index = f"h + kh"
         input_w_index = f"w + kw"
-        output_h_constraint = f"h in 0:{H.add(2*self.padding[0] - KH + self.stride[0] - 1)}"
-        output_w_constraint = f"w in 0:{W.add(2*self.padding[1] - KW + self.stride[1] - 1)}"
 
         if self.padding[0] > 0:
             input_h_index += f" - {self.padding[0]}"
@@ -76,10 +74,14 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
             input_w_index += f" - {self.padding[1]}"
         if self.stride[0] > 1:
             input_h_index = f"{self.stride[0]}*" + input_h_index
-            output_h_constraint = f"({output_h_constraint})/{self.stride[0]}"
+            output_h_constraint = f"h in 0:({H.add(2*self.padding[0] - KH + self.stride[0])})/{self.stride[0]}"
+        else:
+            output_h_constraint = f"h in 0:{H.add(2*self.padding[0] - KH + self.stride[0])}"
         if self.stride[1] > 1:
             input_w_index = f"{self.stride[1]}*" + input_w_index
-            output_w_constraint = f"({output_w_constraint})/{self.stride[1]}"
+            output_w_constraint = f"w in 0:({W.add(2*self.padding[1] - KW + self.stride[1])})/{self.stride[1]}"
+        else:
+            output_w_constraint = f"w in 0:{W.add(2*self.padding[1] - KW + self.stride[1])}"
 
         forward = (
                 f"{output}(n, g, m, h, w) +=! {input}(n, g, c, " +

@@ -12,8 +12,8 @@ class TestConv(TorchTestCase):
     def setUp(self):
         self.batch_size = 2
         self.in_channels = 3
-        self.in_height = 17
-        self.in_width = 19
+        self.in_height = 34
+        self.in_width = 37
         self.tc_image = Variable(
             torch.randn(self.batch_size, 1, self.in_channels, self.in_height, self.in_width),
             requires_grad=True)

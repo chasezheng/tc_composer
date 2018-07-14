@@ -40,7 +40,7 @@ class UniqueName(str):      # todo add a lot of tests
 class Size(UniqueName):
     __slots__ = '_num',
 
-    def __new__(cls, var: Union[int, str] = None):
+    def __new__(cls, var: Union[int, str] = None) -> 'Size':
         if isinstance(var, str):
             obj = super(Size, cls).__new__(cls, prefix=var)
             obj._num: int = None
@@ -67,28 +67,8 @@ class Size(UniqueName):
         assert self._num is None or self._num == v, f"Trying to reset the value of {''.join(self)}={self._num} to {v}"
         self._num = v
 
-    def prod(self, *v: Union[str, int]) -> str:
-        multiplier = 1
-        for i in v:
-            if isinstance(i, int):
-                assert i > 0, f'i should be positive. Found {i}'
-                multiplier *= i
-
-        remaining = [i for i in v if not isinstance(i, int)]
-        if self._num is not None:
-            out = str(self._num * multiplier)
-        else:
-            out = self
-            if multiplier > 1:
-                remaining.append(str(multiplier))
-
-        for i in remaining:
-            out += f' * {i}'
-
-        return out
-
     def add(self, *v: Union[str, int]) -> str:
-        summant = 1
+        summant = 0
         for i in v:
             if isinstance(i, int):
                 summant += i
@@ -98,15 +78,17 @@ class Size(UniqueName):
             out = str(self._num + summant)
         else:
             out = self
-            if summant > 1:
-                remaining.append(str(summant))
+            if summant > 0:
+                out += f' + {summant}'
+            elif summant < 0:
+                out += f' - {-summant}'
 
         for i in remaining:
             out += f' + {i}'
 
         return out
 
-    def sub(self, *v: Union[str, int]) -> str:
+    def sub(self, *v: Union[str, int]) -> str:  # todo tests
         sub_total = 0
         for i in v:
             if isinstance(i, int):
@@ -117,8 +99,10 @@ class Size(UniqueName):
             out = str(self._num + sub_total)
         else:
             out = self
-            if sub_total > 1:
-                remaining.append(str(sub_total))
+            if sub_total > 0:
+                out += f' - {sub_total}'
+            elif sub_total < 0:
+                out += f' + {-sub_total}'
 
         for i in remaining:
             out += f' - {i}'
@@ -133,8 +117,9 @@ class TensorName(UniqueName):
                 dim: int,
                 type: str = DEFAULT_TYPE,
                 sizes: Sequence[Union[str, int]] = None,
-                prefix: str = 'T'):
+                prefix: str = 'T') -> 'TensorName':
         obj = super(TensorName, cls).__new__(cls, prefix=prefix)
+        assert type.lower() in ('double', 'float', 'long')
         if sizes is not None:
             assert not isinstance(sizes, str)
             assert len(sizes) == dim
