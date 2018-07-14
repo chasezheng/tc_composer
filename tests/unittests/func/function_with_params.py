@@ -18,6 +18,7 @@ class TestFuncWithParams(TorchTestCase):
 
         in_n = 50
         self.activation = TestActivation('tanh', input_dim=2)
+        self.activation2 = TestActivation('tanh', input_dim=2)
         self.inp = torch.randn(1, in_n)
 
         if os.path.exists(self.activation.option_file):
@@ -69,10 +70,17 @@ class TestFuncWithParams(TorchTestCase):
             self.activation.get_options(self.inp, error_if_empty=True)
         option = self.activation.tune_options(
             [self.inp],
-            tuner_config=tc.TunerConfig().number_elites(1).generations(1).pop_size(10).mutation_rate(3)
+            tuner_config=tc.TunerConfig().number_elites(1).generations(1).pop_size(1)
         )
-        loaded = self.activation.get_options(self.inp, error_if_empty=True)
 
+        # Each uses unique names
+        self.assertNotEqual(self.activation.tc_def(self.inp),
+                            self.activation2.tc_def(self.inp))
+        self.assertEqual(self.activation.get_options(self.inp).serialize(),
+                         self.activation2.get_options(self.inp).serialize())
+
+        # Loaded option equals tuned option
+        loaded = self.activation.get_options(self.inp, error_if_empty=True)
         self.assertEqual(option.serialize(), loaded.serialize())
 
 
