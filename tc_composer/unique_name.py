@@ -40,7 +40,7 @@ class UniqueName(str):      # todo add a lot of tests
 class Size(UniqueName):
     __slots__ = '_num',
 
-    def __new__(cls, var: Union[int, str] = None):
+    def __new__(cls, var: Union[int, str] = None) -> 'Size':
         if isinstance(var, str):
             obj = super(Size, cls).__new__(cls, prefix=var)
             obj._num: int = None
@@ -117,8 +117,9 @@ class TensorName(UniqueName):
                 dim: int,
                 type: str = DEFAULT_TYPE,
                 sizes: Sequence[Union[str, int]] = None,
-                prefix: str = 'T'):
+                prefix: str = 'T') -> 'TensorName':
         obj = super(TensorName, cls).__new__(cls, prefix=prefix)
+        assert type.lower() in ('double', 'float', 'long')
         if sizes is not None:
             assert not isinstance(sizes, str)
             assert len(sizes) == dim
