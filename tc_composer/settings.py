@@ -1,10 +1,14 @@
 import logging
 import os
+import sys
+from functools import lru_cache
+from typing import Union
 
 import torch
-from functools import lru_cache
+from numba import cuda
 from torch import Tensor
-from typing import Union
+
+
 #
 # Configure logging
 #
@@ -20,8 +24,8 @@ def get_configured_logger(name):
     logger.setLevel(logging.INFO)
     return logger
 
-LOGGER = get_configured_logger(__name__)
 
+LOGGER = get_configured_logger(__name__)
 
 #
 # Default settings
@@ -51,6 +55,10 @@ LOGGER.info(f'Setting default tensor type: {DEFAULT_TENSOR}')
 LOGGER.info(f'Setting epsilon: {EPSILON}')
 LOGGER.info(f'Input tensor shape checking: {CHECKING_SHAPE}')
 LOGGER.info(f'Saving compiled options in: {OPTIONS_DIR}')
+LOGGER.info(f"Current CUDA device: {cuda.get_current_device().name.decode('utf-8')}")
+LOGGER.info(f"Listing CUDA devices:")
+sys.stdout.flush()
+cuda.detect()
 
 
 #
@@ -76,15 +84,13 @@ DEFAULT_TYPE = tc_type(DEFAULT_TENSOR)
 if not os.path.exists(OPTIONS_DIR):
     os.makedirs(OPTIONS_DIR)
 
-
 #
 # Sanity check
 #
-assert torch.Tensor(1).is_cuda, f'Default tensor type is not cuda: {torch.Tensor(1).type()}. Check tc_composer.settings.'
-
+assert torch.Tensor(1).is_cuda, \
+    f'Default tensor type is not cuda: {torch.Tensor(1).type()}. Check tc_composer.settings.'
 
 #
 # Clean up
 #
 del LOGGER, torch, os, lru_cache
-

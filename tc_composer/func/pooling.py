@@ -21,7 +21,16 @@ class AveragePooling(FunctionWithParams):  # todo dim
         else:
             input, = in_names
 
-        output = TensorName(dim=4, sizes=(*input.sizes[:2], 'OH', 'OW'), prefix='output')
+        if input.sizes[-2].num is not None:
+            OH = (input.sizes[-2].num + self.stride[0] - self.kernel_size[0]) // self.stride[0]
+        else:
+            OH = 'OH'
+        if input.sizes[-1].num is not None:
+            OW = (input.sizes[-1].num + self.stride[1] - self.kernel_size[1]) // self.stride[1]
+        else:
+            OW = 'OW'
+
+        output = TensorName(dim=4, sizes=(*input.sizes[:2], OH, OW), prefix='output')
 
         body = (f"{output}(b, c, h, w) +=! {input}(b, c, {self.stride[0]}*h + kh, {self.stride[1]}*w + kw)\n"
                 f"    where kh in 0:{self.kernel_size[0]}, kw in 0:{self.kernel_size[1]}\n"
@@ -46,7 +55,16 @@ class MaxPooling(FunctionWithParams):
         else:
             input, = in_names
 
-        output = TensorName(dim=4, sizes=(*input.sizes[:2], 'OH', 'OW'), prefix='output')
+        if input.sizes[-2].num is not None:
+            OH = (input.sizes[-2].num + self.stride[0] - self.kernel_size[0]) // self.stride[0]
+        else:
+            OH = 'OH'
+        if input.sizes[-1].num is not None:
+            OW = (input.sizes[-1].num + self.stride[1] - self.kernel_size[1]) // self.stride[1]
+        else:
+            OW = 'OW'
+
+        output = TensorName(dim=4, sizes=(*input.sizes[:2], OH, OW), prefix='output')
         body = (f"{output}(b, c, h, w) max=! {input}(b, c, h*{self.stride[0]} + kh, w*{self.stride[1]} + kw)\n"
                 f"    where kh in 0:{self.kernel_size[0]}, kw in 0:{self.kernel_size[1]}")
 
