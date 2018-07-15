@@ -15,7 +15,7 @@ class TestConv(TorchTestCase):
         self.in_height = 34
         self.in_width = 37
         self.tc_image = Variable(
-            torch.randn(self.batch_size, 1, self.in_channels, self.in_height, self.in_width),
+            torch.randn(self.batch_size, self.in_channels, self.in_height, self.in_width),
             requires_grad=True)
         self.torch_image = Variable(
             torch.Tensor(self.batch_size, self.in_channels, self.in_height, self.in_width),

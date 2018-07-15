@@ -35,25 +35,51 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
     @property
     @lru_cache(maxsize=None)
     def named_params(self):
-        if self.use_bias:
-            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
-                                        prefix='weight'), \
-                   TensorName.make_pair(sizes=(self.groups, self.out_channels), prefix='bias')
+        if self.groups > 1:
+            if self.use_bias:
+                return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
+                                            prefix='weight'), \
+                       TensorName.make_pair(sizes=(self.groups, self.out_channels), prefix='bias')
+            else:
+                return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
+                                            prefix='weight'),
         else:
-            return TensorName.make_pair(sizes=(self.groups, self.out_channels, self.in_channels, *self.kernel_size),
-                                        prefix='weight'),
+            if self.use_bias:
+                return TensorName.make_pair(sizes=(self.out_channels, self.in_channels, *self.kernel_size),
+                                            prefix='weight'), \
+                       TensorName.make_pair(sizes=(self.out_channels,), prefix='bias')
+            else:
+                return TensorName.make_pair(sizes=(self.out_channels, self.in_channels, *self.kernel_size),
+                                            prefix='weight'),
 
     def def_components(self, in_names: Sequence[TensorName] = None):
         assert in_names is None or len(in_names) == 1
         if in_names is not None:
             input = in_names[0]
         else:
-            input = TensorName(dim=5, prefix='input', sizes=('B', self.groups, self.in_channels, 'H', 'W'))
+            if self.groups > 1:
+                input = TensorName(dim=5, prefix='input', sizes=('B', self.groups, self.in_channels, 'H', 'W'))
+            else:
+                input = TensorName(dim=4, prefix='input', sizes=('B', self.in_channels, 'H', 'W'))
 
-        input.sizes[1].num = self.groups
-        input.sizes[2].num = self.in_channels
-        output_sizes = (input.sizes[0], self.groups, self.out_channels, *self.kernel_size)
-        output = TensorName(dim=5, prefix='output', sizes=output_sizes)
+        if input.sizes[-2].num is not None:
+            OH = (input.sizes[-2].num + 2*self.padding[0] + self.stride[0] - self.kernel_size[0]) // self.stride[0]
+        else:
+            OH = 'OH'
+        if input.sizes[-1].num is not None:
+            OW = (input.sizes[-1].num + 2*self.padding[1] + self.stride[1] - self.kernel_size[1]) // self.stride[1]
+        else:
+            OW = 'OW'
+
+        if self.groups > 1:
+            input.sizes[1].num = self.groups
+            input.sizes[2].num = self.in_channels
+            output_sizes = (input.sizes[0], self.groups, self.out_channels, OH, OW)
+        else:
+            input.sizes[1].num = self.in_channels
+            output_sizes = (input.sizes[0], self.out_channels, OH, OW)
+
+        output = TensorName(dim=len(output_sizes), prefix='output', sizes=output_sizes)
 
         if self.use_bias:
             weight, _ = self.named_params[0]
@@ -74,26 +100,37 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
             input_w_index += f" - {self.padding[1]}"
         if self.stride[0] > 1:
             input_h_index = f"{self.stride[0]}*" + input_h_index
-            output_h_constraint = f"h in 0:({H.add(2*self.padding[0] - KH + self.stride[0])})/{self.stride[0]}"
+            output_h_upper_bound = f"({H.add(2*self.padding[0] - KH + self.stride[0])})/{self.stride[0]}"
         else:
-            output_h_constraint = f"h in 0:{H.add(2*self.padding[0] - KH + self.stride[0])}"
+            output_h_upper_bound = f"{H.add(2*self.padding[0] - KH + self.stride[0])}"
         if self.stride[1] > 1:
             input_w_index = f"{self.stride[1]}*" + input_w_index
-            output_w_constraint = f"w in 0:({W.add(2*self.padding[1] - KW + self.stride[1])})/{self.stride[1]}"
+            output_w_upper_bound = f"({W.add(2*self.padding[1] - KW + self.stride[1])})/{self.stride[1]}"
         else:
-            output_w_constraint = f"w in 0:{W.add(2*self.padding[1] - KW + self.stride[1])}"
+            output_w_upper_bound = f"{W.add(2*self.padding[1] - KW + self.stride[1])}"
 
+        output_h_upper_bound = output_sizes[-2] if isinstance(output_sizes[-2], int) else output_h_upper_bound
+        output_w_upper_bound = output_sizes[-1] if isinstance(output_sizes[-1], int) else output_w_upper_bound
+
+        output_h_constraint = f"h in 0:{output_h_upper_bound}"
+        output_w_constraint = f"w in 0:{output_w_upper_bound}"
+
+        g_ = 'g, ' if self.groups > 1 else ''
         forward = (
-                f"{output}(n, g, m, h, w) +=! {input}(n, g, c, " +
+                f"{output}(n, {g_}m, h, w) +=! {input}(n, {g_}c, " +
                 (f"max(min({input_h_index}, {H.sub(1)}), 0)" if self.padding[0] > 0 else input_h_index) + ', ' +
                 (f"max(min({input_w_index}, {W.sub(1)}), 0)" if self.padding[1] > 0 else input_w_index) +
                 f") "
-                f"* {weight}(g, m, c, kh, kw) \n" +
-                (f"                              * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * ({H} - ({input_h_index}))))\n" if self.padding[0] > 0 else '') +  # Setting zero at the padding boundaries.
-                (f"                              * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * ({W} - ({input_w_index}))))\n" if self.padding[1] > 0 else '') +
+                f"* {weight}({g_}m, c, kh, kw) \n" +
+                (
+                    f"                              * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * ({H} - ({input_h_index}))))\n" if
+                    self.padding[0] > 0 else '') +  # Setting zero at the padding boundaries.
+                (
+                    f"                              * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * ({W} - ({input_w_index}))))\n" if
+                    self.padding[1] > 0 else '') +
                 f"    where kh in 0:{KH}, kw in 0:{KW}, {output_h_constraint}, {output_w_constraint}\n" +
-                (f"{output}(n, g, m, h, w) = {output}(n, g, m, h, w) + {bias}(g, m)\n"
-                 f"     where {output_h_constraint}, {output_w_constraint}" if self.use_bias else ''))
+                (f"{output}(n, {g_}m, h, w) = {output}(n, {g_}m, h, w) + {bias}({g_}m)\n"
+                 f"" if self.use_bias else ''))
 
         return forward, (input,), (output,), ()
 

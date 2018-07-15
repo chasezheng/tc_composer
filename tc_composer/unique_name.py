@@ -69,11 +69,15 @@ class Size(UniqueName):
 
     def add(self, *v: Union[str, int]) -> str:
         summant = 0
+        remaining = []
         for i in v:
             if isinstance(i, int):
                 summant += i
+            elif i.num is not None:
+                summant += i.num
+            else:
+                remaining.append(i)
 
-        remaining = [i for i in v if not isinstance(i, int)]
         if self._num is not None:
             out = str(self._num + summant)
         else:
@@ -90,13 +94,17 @@ class Size(UniqueName):
 
     def sub(self, *v: Union[str, int]) -> str:  # todo tests
         sub_total = 0
+        remaining = []
         for i in v:
             if isinstance(i, int):
-                sub_total -= i
+                sub_total += i
+            elif i.num is not None:
+                sub_total += i.num
+            else:
+                remaining.append(i)
 
-        remaining = [i for i in v if not isinstance(i, int)]
         if self._num is not None:
-            out = str(self._num + sub_total)
+            out = str(self._num - sub_total)
         else:
             out = self
             if sub_total > 0:

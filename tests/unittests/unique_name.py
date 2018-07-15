@@ -49,15 +49,14 @@ class TestSize(TorchTestCase):
         self.assertEqual(size.add(10), f'{size} + 10')
         self.assertEqual(size.add(size1), f'{size} + {size1}')
         self.assertEqual(size.add(size_num), f'{size} + {size_num}')
-        self.assertEqual(size.add(size1, size_num), f'{size} + {size1} + {size_num}')
-        self.assertEqual(size.add(size1, size_num, 10), f'{size} + {size1} + {10 + size_num.num}')
+        self.assertEqual(size.add(size1, size_num), f'{size} + {size_num} + {size1}')
+        self.assertEqual(size.add(size1, size_num, 10), f'{size} + {10 + size_num.num} + {size1}')
 
-        self.assertEqual(size_num.add(10), f'{size.num + 10}')
-        self.assertEqual(size_num.add(size1), f'{size} + {size1}')
+        self.assertEqual(size_num.add(10), f'{size_num.num + 10}')
+        self.assertEqual(size_num.add(size1), f'{size_num} + {size1}')
         self.assertEqual(size_num.add(size), f'{size_num} + {size}')
         self.assertEqual(size_num.add(size1, size), f'{size_num} + {size1} + {size}')
-        self.assertEqual(size_num.add(size1, size_num, 10),
-                         f'{size_num.num + 10} + {size1} + {10 + size_num.num}')
+        self.assertEqual(size_num.add(size1, size, 10), f'{10 + size_num.num} + {size1} + {size}')
 
     def test_sub(self):
         size = Size()
@@ -67,15 +66,14 @@ class TestSize(TorchTestCase):
         self.assertEqual(size.sub(10), f'{size} - 10')
         self.assertEqual(size.sub(size1), f'{size} - {size1}')
         self.assertEqual(size.sub(size_num), f'{size} - {size_num}')
-        self.assertEqual(size.sub(size1, size_num), f'{size} - {size1} - {size_num}')
-        self.assertEqual(size.sub(size1, size_num, 10), f'{size} - {size1} - {10 + size_num.num}')
+        self.assertEqual(size.sub(size1, size_num), f'{size} - {size_num} - {size1}')
+        self.assertEqual(size.sub(size1, size_num, 10), f'{size} - {10 + size_num.num} - {size1}')
 
-        self.assertEqual(size_num.sub(10), f'{size.num + 10}')
-        self.assertEqual(size_num.sub(size1), f'{size} - {size1}')
+        self.assertEqual(size_num.sub(10), f'{size_num.num - 10}')
+        self.assertEqual(size_num.sub(size1), f'{size_num} - {size1}')
         self.assertEqual(size_num.sub(size), f'{size_num} - {size}')
         self.assertEqual(size_num.sub(size1, size), f'{size_num} - {size1} - {size}')
-        self.assertEqual(size_num.sub(size1, size_num, 10),
-                         f'{size_num.num + 10} - {size1} - {10 + size_num.num}')
+        self.assertEqual(size_num.sub(size1, size, 10), f'{size_num.num - 10} - {size1} - {size}')
 
 
 class TestTensorName(TorchTestCase):
