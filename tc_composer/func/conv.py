@@ -8,7 +8,7 @@ from ..unique_name import TensorName
 
 
 class Convolution(FunctionWithParams):  # todo dilation, different dimensions
-    __slots__ = '_named_params', 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias'
+    __slots__ = 'in_channels', 'out_channels', 'kernel_size', 'padding', 'stride', 'groups', 'use_bias'
 
     def __init__(self,
                  in_channels: int,
@@ -72,6 +72,7 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
             OW = 'OW'
 
         if self.groups > 1:
+            assert input.dim == 5, f"input=({input.arg})"
             input.sizes[1].num = self.groups
             input.sizes[2].num = self.in_channels
             output_sizes = (input.sizes[0], self.groups, self.out_channels, OH, OW)

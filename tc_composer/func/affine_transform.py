@@ -30,6 +30,7 @@ class AffineTransform(FunctionWithParams):
         else:
             assert len(in_names) == 1
             input = in_names[0]
+            assert len(input.sizes) == 2
         input.sizes[1].num = self.in_n
         output = TensorName(dim=2, sizes=(input.sizes[0], self.out_n), prefix='output')
 

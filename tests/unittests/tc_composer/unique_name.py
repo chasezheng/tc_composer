@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from tc_composer.unique_name import UniqueName, Size, TensorName
-from .torch_test_case import TorchTestCase
+from ..torch_test_case import TorchTestCase
 from torch import Tensor
 
 class TestUniqueName(TorchTestCase):
@@ -11,7 +11,7 @@ class TestUniqueName(TorchTestCase):
 
         self.assertEqual(unique_name, unique_str)
         self.assertIsInstance(unique_name, str)
-        self.assertEqual(hash(unique_str), )
+        self.assertEqual(hash(unique_str), hash(unique_name))
         self.assertEqual(unique_name.capitalize(), unique_str.capitalize())
 
     def test_uniqueness(self):

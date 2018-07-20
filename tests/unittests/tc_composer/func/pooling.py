@@ -1,12 +1,11 @@
 import torch
 from torch import nn
-from torch.autograd import Variable
 
 from tc_composer.func.pooling import MaxPooling, AveragePooling
-from ..torch_test_case import TorchTestCase
+from .function_with_params import FuncTestCase
 
 
-class TestPooling(TorchTestCase):
+class TestPooling(FuncTestCase):
     def setUp(self):
         self.stride = (2, 3)
         self.kernel_size = (5, 7)
@@ -21,6 +20,7 @@ class TestPooling(TorchTestCase):
 
         tc_max_pooling.recompile(image)
         self.assert_allclose(tc_max_pooling(image), torch_max_pooling(image))
+        self.serialize_test(tc_max_pooling, image)
 
     def test_avg_pooling(self):
         tc_avg_pooling = AveragePooling(stride=self.stride, kernel_size=self.kernel_size)
@@ -29,3 +29,4 @@ class TestPooling(TorchTestCase):
 
         tc_avg_pooling.recompile(image)
         self.assert_allclose(tc_avg_pooling(image), torch_avg_pooling(image))
+        self.serialize_test(tc_avg_pooling, image)

@@ -3,10 +3,10 @@ import os
 from abc import ABCMeta, abstractmethod
 from functools import lru_cache
 from itertools import chain
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Callable
 
 import tensor_comprehensions as tc
-from numba import cuda
+import torch
 from torch import Tensor
 
 from .. import settings
@@ -15,7 +15,7 @@ from ..unique_name import TensorName
 
 
 class FunctionWithParams(metaclass=ABCMeta):
-    __slots__ = 'compilation_cache', '_entry_point', 'funcs'
+    __slots__ = 'compilation_cache', '_entry_point'
 
     def __init__(self, entry_point: str = None):
         self.compilation_cache: tc.CompilationCache = None
@@ -23,7 +23,7 @@ class FunctionWithParams(metaclass=ABCMeta):
 
     @property
     @lru_cache(maxsize=None)
-    def __call__(self):
+    def __call__(self, *inputs: Tensor, outputs: Sequence[Tensor] = None):
         if self.compilation_cache is None:
             raise Exception('Please call recompile first.')
 
@@ -88,6 +88,21 @@ class FunctionWithParams(metaclass=ABCMeta):
         else:
             return self  # todo test
 
+    def __getstate__(self):
+        slots = chain(*(c.__slots__ for c in self.__class__.__mro__ if c is not object))
+
+        attr = dict((n, getattr(self, n)) for n in slots if n != 'compilation_cache')
+        params = tuple(self.params)
+        return attr, params
+
+    def __setstate__(self, state):
+        self.compilation_cache = None
+        attr, params = state
+        for n, v in attr.items():
+            setattr(self, n, v)
+        for p0, p1 in zip(self.params, params):
+            p0.data = p1.data
+
     @property
     def entry_point(self):
         return self._entry_point or type(self).__name__
@@ -114,7 +129,7 @@ class FunctionWithParams(metaclass=ABCMeta):
     @property
     def option_file(self):
         fname = '_'.join((self.entry_point,
-                          *cuda.get_current_device().name.decode('utf-8').split()))
+                          *torch.cuda.get_device_name(torch.cuda.current_device()).split()))
         return os.path.join(OPTIONS_DIR, fname)
 
     @property

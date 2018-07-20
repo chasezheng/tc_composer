@@ -2,7 +2,7 @@ import logging
 import unittest
 from functools import lru_cache
 from numbers import Number
-from typing import Union
+from typing import Union, Sequence
 
 import numpy as np
 import torch
@@ -11,7 +11,9 @@ from torch.autograd import Variable
 
 from tc_composer.settings import EPSILON, DEFAULT_TYPE, get_configured_logger
 
-AnyNumeric = Union[DoubleTensor, FloatTensor, HalfTensor, LongTensor, np.ndarray, Number, Variable]
+# Type definition
+DataType = (DoubleTensor, FloatTensor, HalfTensor, LongTensor, np.ndarray, Number, Variable)
+AnyNumeric = Union[(*DataType, *(Sequence[T] for T in DataType))]
 
 
 class TorchTestCase(unittest.TestCase):
@@ -41,18 +43,21 @@ class TorchTestCase(unittest.TestCase):
     @property
     @lru_cache(maxsize=None)
     def logger(self):
-        logger = logging.getLogger(type(self).__name__)
-        logger.propagate = False
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(('[%(levelname)s] %(name)s.%(funcName)s - %(message)s')))
-        handler.setLevel(logging.INFO)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-        return logger
+        return get_configured_logger(type(self).__name__)
 
     def assert_allclose(self, actual: AnyNumeric, desired: AnyNumeric,
                         rtol: float = None, atol: float = None,
                         equal_nan: bool = True, err_msg: str = '', verbose: bool = True):
+        if isinstance(actual, (list, tuple)):
+            for n, (a, d) in enumerate(zip(actual, desired)):
+                try:
+                    self.assert_allclose(actual=a, desired=d,
+                                     rtol=rtol, atol=atol, equal_nan=equal_nan, err_msg=err_msg, verbose=verbose)
+                except:
+                    self.logger.error(f'At n={n}')
+                    raise
+            return
+
         rtol = rtol or self.RTOL
         atol = atol or self.ATOL
 

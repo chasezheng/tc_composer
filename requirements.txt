@@ -4,3 +4,4 @@ numpy==1.14.5
 tensor-comprehensions==0.1.1
 torch==0.4.0
 torchvision==0.2.1
+datadog==0.20.0

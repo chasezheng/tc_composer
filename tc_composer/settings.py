@@ -1,31 +1,10 @@
 import logging
 import os
-import sys
 from functools import lru_cache
 from typing import Union
 
 import torch
-from numba import cuda
 from torch import Tensor
-
-
-#
-# Configure logging
-#
-
-@lru_cache(maxsize=None)
-def get_configured_logger(name):
-    logger = logging.getLogger(name)
-    logger.propagate = False
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(('[%(levelname)s] %(name)s - %(message)s')))
-    handler.setLevel(logging.INFO)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
-
-
-LOGGER = get_configured_logger(__name__)
 
 #
 # Default settings
@@ -40,13 +19,41 @@ CHECKING_SHAPE = False
 # Override settings from environmental variables
 #
 if os.environ.get('UNIT_TESTING', None) == 'True':
+    UNIT_TESTING = True
     DEFAULT_TENSOR = 'torch.cuda.DoubleTensor'
     CHECKING_SHAPE = True
+else:
+    UNIT_TESTING = False
 
 if os.environ.get('BENCHMARKING', None) == 'True':
+    BENCHMARKING = True
     CHECKING_SHAPE = False
-    if 'double' in DEFAULT_TENSOR.lower():
-        LOGGER.warning("Using double tensors in benchmark mode.")
+else:
+    BENCHMARKING = False
+
+
+#
+# Configure logging
+#
+
+@lru_cache(maxsize=None)
+def get_configured_logger(name: str, format: str = None):
+    if UNIT_TESTING:
+        format = format or '[%(levelname)s] %(name)s.%(funcName)s L.%(lineno)d - %(message)s'
+    else:
+        format = format or '[%(levelname)s] %(name)s - %(message)s'
+
+    logger = logging.getLogger(name)
+    logger.propagate = False
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(format))
+    handler.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
+
+LOGGER = get_configured_logger(__name__)
 
 #
 # Logging
@@ -55,10 +62,9 @@ LOGGER.info(f'Setting default tensor type: {DEFAULT_TENSOR}')
 LOGGER.info(f'Setting epsilon: {EPSILON}')
 LOGGER.info(f'Input tensor shape checking: {CHECKING_SHAPE}')
 LOGGER.info(f'Saving compiled options in: {OPTIONS_DIR}')
-LOGGER.info(f"Current CUDA device: {cuda.get_current_device().name.decode('utf-8')}")
-LOGGER.info(f"Listing CUDA devices:")
-sys.stdout.flush()
-cuda.detect()
+LOGGER.info(f"Current CUDA device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
+if 'double' in DEFAULT_TENSOR.lower() and BENCHMARKING:
+    LOGGER.warning("Using double tensors in benchmark mode.")
 
 
 #

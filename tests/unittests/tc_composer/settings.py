@@ -1,5 +1,5 @@
 from tc_composer.settings import tc_type
-from .torch_test_case import TorchTestCase
+from ..torch_test_case import TorchTestCase
 
 
 class TestTCType(TorchTestCase):

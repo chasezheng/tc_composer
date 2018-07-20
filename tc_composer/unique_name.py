@@ -64,7 +64,8 @@ class Size(UniqueName):
 
     @num.setter
     def num(self, v):
-        assert self._num is None or self._num == v, f"Trying to reset the value of {''.join(self)}={self._num} to {v}"
+        assert self._num is None or self._num == v, \
+            f"Trying to reset the value of {''.join(self)}={self._num} to {v}."
         self._num = v
 
     def add(self, *v: Union[str, int]) -> str:
