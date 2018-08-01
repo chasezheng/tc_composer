@@ -8,7 +8,7 @@ from asyncio import sleep
 from collections import abc
 from datetime import datetime
 from functools import lru_cache
-from typing import Tuple, MutableSequence, Callable, Sequence
+from typing import Tuple, MutableSequence, Sequence, MutableMapping
 
 import numpy as np
 import tensor_comprehensions as tc
@@ -20,13 +20,13 @@ from tc_composer.func.function_with_params import FunctionWithParams
 from .async_queue import AsyncQueue
 from .gpu_lock import gpu_lock
 from .modules import Vectorizer, Evaluator
+from .option_result import OptionResult
 from .settings import EVENT_LOOP, get_configured_logger, SAVE_DIR
 from .stats import TunerStats
 
 
 class Worker(multiprocessing.Process):
-    __slots__ = '_result_queue', '_progress_queue', 'tuner_config', \
-                '_f', '_start_option_attr', '_inps', '_correct_out'
+    __slots__ = 'tuner_config', '_f', '_start_option_res', '_inps', '_correct_out', 'progress'
 
     RTOL = 1e-3 if settings.DEFAULT_TYPE.lower() == 'float' else 1e-9
     NOT_VIABLE: float = float('inf')
@@ -34,43 +34,50 @@ class Worker(multiprocessing.Process):
 
     TUNER_CONFIG = tc.TunerConfig().pop_size(2).generations(1).crossover_rate(1).mutation_rate(3)
 
+    _MANAGER = multiprocessing.Manager()
+    _QUEUED: MutableSequence[OptionResult] = _MANAGER.list()
+    _STARTED: MutableMapping[OptionResult, Tuple[datetime, int]] = _MANAGER.dict()
+    _RESULT: MutableSequence[Tuple[OptionResult, float]] = _MANAGER.list()
+
+    _MEAN_WORK_TIME: MutableMapping[str, Tuple[float, float]] = _MANAGER.dict()
+
     def __init__(self,
                  round: int,
                  f: FunctionWithParams,
                  inps: Sequence[Tensor],
                  correct_outs: Sequence[Tensor],
-                 start_option_attr: Vectorizer.OptionAttr,
-                 progress_queue: AsyncQueue,
-                 result_queue: AsyncQueue):
+                 start_option_res: OptionResult):
         super(Worker, self).__init__()
-        self._round = round
-        self._start_option_attr = start_option_attr
-        self._progress_queue = progress_queue
-        self._result_queue = result_queue
+        self._start_option_res = start_option_res
         self._f = f
         self._inps = inps
         self._correct_out = correct_outs
 
+        self.progress = self._MANAGER.Namespace()
+        self.progress.remaining_round = round
+        self.progress.option_res = start_option_res
+        self.progress.done = False
+
     def run(self):
-        EVENT_LOOP.stop()
         f = self._f
         inps = self._inps
-        option_attrs = self._start_option_attr
+        start_option_res = self._start_option_res
 
-        for _ in range(self._round):
-            self._progress_queue.put((option_attrs, datetime.now(), self.pid))
+        for _ in range(self.progress.remaining_round):
+            self._STARTED[start_option_res] = datetime.now(), self.pid
 
+            with gpu_lock:
+                option = f.tune_options(
+                    inps,
+                    start_option=start_option_res.option,
+                    tuner_config=self.TUNER_CONFIG,
+                    save_result=False
+                )
+                option_res = OptionResult(option)
             try:
-                with gpu_lock:
-                    option = f.tune_options(
-                        inps,
-                        start_option=Vectorizer.from_attr_to_opt(option_attrs),
-                        tuner_config=self.TUNER_CONFIG,
-                        save_result=False
-                    )
                 f.recompile(*inps, option=option)
             except RuntimeError:
-                self._result_queue.put((option_attrs, self.NOT_VIABLE))
+                self.add_result(option_res, self.NOT_VIABLE)
                 traceback.print_exc()
             else:
                 # Check correctness
@@ -84,12 +91,9 @@ class Worker(multiprocessing.Process):
                             np.testing.assert_allclose(out.data, self._correct_out[0].data,
                                                        rtol=self.RTOL)
                 except AssertionError:
-                    self._result_queue.put((Vectorizer.parse_option_str(str(option)),
-                                            self.NOT_VIABLE))
+                    self.add_result(OptionResult(option_res), self.NOT_VIABLE)
                     traceback.print_exc()
                 else:
-                    option_attrs = Vectorizer.parse_option_str(str(option))
-
                     synchronize = torch.cuda.synchronize
                     timer = time.perf_counter
 
@@ -101,12 +105,76 @@ class Worker(multiprocessing.Process):
                         synchronize()
                         end = timer()
 
-                    self._result_queue.put((option_attrs, start - end))
+                    self.add_result(option_res, end - start)
+                    start_option_res = option_res
+
+                    self.progress.remaining_round -= 1
+                    self.progress.option_res = start_option_res
+
+        self.progress.done = True
+
+    def reincarnate(self):
+        return Worker(
+            round=self.progress.remaining_round,
+            f=self._f,
+            inps=self._inps,
+            correct_outs=self._correct_out,
+            start_option_res=self.progress.option_res,
+        )
+
+    @classmethod
+    def queue(cls, option: OptionResult):
+        cls._QUEUED.append(option)
+
+    @classmethod
+    def started(cls, option: OptionResult):
+        cls._STARTED[option] = datetime.now(), os.getgid()
+
+    def add_result(self, option: OptionResult, f: float):
+        now = datetime.now()
+        start_time, pid = self._STARTED.pop(option)
+        duration = (now - start_time).total_seconds()
+
+        with self._MEAN_WORK_TIME.get_lock():
+            mean, _2nd_moment = self._MEAN_WORK_TIME[self._f.entry_point]
+            mean = .99 * mean + .01 * duration
+            _2nd_moment = .99 * _2nd_moment + .01 * (duration ** 2)
+            self._MEAN_WORK_TIME[self._f.entry_point] = mean, _2nd_moment
+
+        self._RESULT.append((option, f))
+
+    @classmethod
+    async def kill_zombie(cls, *workers: 'Worker'):
+        workers = list(workers)
+        mean, _2nd_moment = 100, 10
+
+        while True:
+            for w in tuple(workers):
+                if w.progress.done:
+                    workers.remove(w)
+            if len(workers) == 0:
+                return
+            pids = tuple(w.pid for w in workers)
+
+            for opt, (dt, pid) in cls._STARTED.items():
+                if pid not in pids:
+                    continue
+
+                worker = workers[pids.index(pid)]
+                mean, _2nd_moment = cls._MEAN_WORK_TIME[worker._f.entry_point]
+                threshold = mean + 2 * (_2nd_moment - mean ** 2) ** .5
+
+                now = datetime.now()
+                duration = (now - dt).total_seconds()
+                if duration > threshold:
+                    worker.terminate()
+                    workers[workers.index(worker)] = worker.reincarnate()
+            await sleep(mean / 2)
 
 
 class Tuner:
-    __slots__ = '_progress_queue', '_result_queue', '_workers', '_evaluator', '_f', '_inps', '_correct_outs', \
-                '_collected_results', '_collected_progress', '_collect_results_config', \
+    __slots__ = '_workers', '_evaluator', '_f', '_inps', '_correct_outs', \
+                 '_collect_results_config', \
                 '_save_result_config', '_stats', '_main_async_config', 'start_option_attr'
 
     NUM_RUNNER = multiprocessing.cpu_count()
@@ -120,11 +188,6 @@ class Tuner:
                  name: str = None):
         super(Tuner, self).__init__()
         self.start_option_attr = Vectorizer.parse_option_str(str(start_option))
-        self._progress_queue: AsyncQueue[Tuple[Vectorizer.OptionAttr, datetime, int]] \
-            = AsyncQueue()  # todo when will this queue size be larger than NUM_RUNNER?
-        self._result_queue: AsyncQueue[Tuple[Vectorizer.OptionAttr, float]] = AsyncQueue()
-        self._collected_progress: MutableSequence[Tuple[Vectorizer.OptionAttr, datetime, int]] = []
-        self._collected_results: MutableSequence[Tuple[Vectorizer.OptionAttr, float]] = []
 
         self._f = f
         self._inps = inps
@@ -153,9 +216,8 @@ class Tuner:
 
     def _make_worker(self, round: int, start_option_attr: Vectorizer.OptionAttr = None) -> Worker:
         return Worker(f=self._f, inps=self._inps, correct_outs=self._correct_outs,
-                      start_option_attr=start_option_attr or self.start_option_attr,
-                      progress_queue=self._progress_queue, round=round,
-                      result_queue=self._result_queue, )
+                      start_option_res=start_option_attr or self.start_option_attr,
+                      round=round)
 
     @staticmethod
     def check_exception(f: asyncio.Future):
@@ -164,99 +226,6 @@ class Tuner:
         e = f.exception()
         if e is not None:
             raise e
-
-    def put_result(self, opt: Vectorizer.OptionAttr, t: float):
-        self._collected_results.append((opt, t))
-
-    def pop_progress(self, opt: Vectorizer.OptionAttr) -> Tuple[datetime, int]:
-        for n, (o, dt, pid) in enumerate(self._collected_progress):
-            if opt == o:
-                self._collected_progress.pop(n)
-                return dt, pid
-        raise Exception
-
-    async def kill_stalled(self):
-        collected_progress = self._collected_progress
-
-        now = datetime.now()
-        for n, (opt_attr, dt, pid) in tuple(enumerate(collected_progress)):
-            if (now - dt).total_seconds() > mean_work_time \
-                    + 2 * ((moment_2nd_work_time - mean_work_time ** 2) ** .5):
-                worker = self._workers[tuple(w.pid for w in self._workers).index(pid)]
-                worker.terminate()
-                round = worker_rounds.pop(pid)
-
-                new_worker = self._make_worker(round=round, start_option_attr=opt_attr)
-                worker_rounds[new_worker.pid] = round
-                self._workers[self._workers.index(worker)] = new_worker
-
-                collected_progress.pop(n)
-                self.put_result(opt_attr, self.NOT_VIABLE)
-                stats.increment('worker_died')
-
-    async def collect_results(self):
-        stats = self._stats
-        progress_queue = self._progress_queue
-        result_queue = self._result_queue
-        collected_progress = self._collected_progress
-        delay, backoff, recovery_bias = self._collect_results_config
-
-        mean_work_time = 100
-        moment_2nd_work_time = mean_work_time ** 2
-
-        worker_rounds = dict((w.pid, 0) for w in self._workers)
-
-        while True:
-            print('collect results')
-            progress_qsize = progress_queue.qsize()
-            self.logger.info(f'progress_qsize: {progress_qsize}')
-            for _ in range(progress_qsize):
-                collected_progress.append(await progress_queue.aget())
-                print('got progress')
-            stats.queue_passage('progress', value=progress_qsize)
-            delay /= (backoff ** progress_qsize)
-
-            result_qsize = result_queue.qsize()
-            self.logger.info(f'result_qsize: {result_qsize}')
-            for _ in range(result_qsize):
-                opt_attr, t = await result_queue.aget()
-                now = datetime.now()
-                start_time, pid = self.pop_progress(opt_attr)
-                self.put_result(opt_attr, t)
-                worker_rounds[pid] += 1
-                mean_work_time = .99 * mean_work_time \
-                                 + .01 * (now - start_time).total_seconds()
-                moment_2nd_work_time = .99 * moment_2nd_work_time \
-                                       + .01 * ((now - start_time).total_seconds() ** 2)
-            stats.queue_passage('result', value=result_qsize)
-            delay /= (backoff ** result_qsize)
-
-            now = datetime.now()
-            for n, (opt_attr, dt, pid) in tuple(enumerate(collected_progress)):
-                if (now - dt).total_seconds() > mean_work_time \
-                        + 2 * ((moment_2nd_work_time - mean_work_time ** 2) ** .5):
-                    worker = self._workers[tuple(w.pid for w in self._workers).index(pid)]
-                    worker.terminate()
-                    round = worker_rounds.pop(pid)
-
-                    new_worker = self._make_worker(round=round, start_option_attr=opt_attr)
-                    worker_rounds[new_worker.pid] = round
-                    self._workers[self._workers.index(worker)] = new_worker
-
-                    collected_progress.pop(n)
-                    self.put_result(opt_attr, self.NOT_VIABLE)
-                    stats.increment('worker_died')
-
-            await asyncio.sleep(delay)
-            delay *= backoff ** (1 / recovery_bias)
-            self._collect_results_config[0] = delay
-            stats.gauge('work_time', mean_work_time, tags=['key:mean'])
-            stats.gauge('work_time',
-                        mean_work_time - ((moment_2nd_work_time - mean_work_time ** 2) ** .5),
-                        tags=['key:-sd'])
-            stats.gauge('work_time',
-                        mean_work_time + ((moment_2nd_work_time - mean_work_time ** 2) ** .5),
-                        tags=['key:+sd'])
 
     async def save_results(self):
         stats = self._stats
@@ -293,8 +262,6 @@ class Tuner:
 
     async def monitor(self):
         stats = self._stats
-        progress = self._progress_queue
-        result = self._result_queue
 
         collect_results_config = self._collect_results_config
 
@@ -303,12 +270,7 @@ class Tuner:
         while True:
             stats.resource_usage()
 
-            stats.queue_size('progress', progress.qsize())
-            stats.queue_size('result', result.qsize())
             stats.gauge('workers_alive', sum(1 for w in self._workers if w.is_alive()))
-
-            stats.gauge('collected', len(self._collected_progress), tags=['key:progress'])
-            stats.gauge('collected', len(self._collected_results), tags=['key:result'])
 
             stats.async_stats('collect_results', *collect_results_config)
             stats.async_stats('gpu_lock',
@@ -321,7 +283,6 @@ class Tuner:
     async def main(self, num: int):
         self._stats.start()
         work = asyncio.gather(self.monitor(),
-                              self.collect_results(),
                               self.save_results(),
                               loop=EVENT_LOOP)
         asyncio.ensure_future(work, loop=EVENT_LOOP)

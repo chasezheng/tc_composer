@@ -172,7 +172,7 @@ class FunctionWithParams(metaclass=ABCMeta):
             return tc.MappingOptions('naive')
         else:
             self.logger.info(
-                f'Option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
+                f'OptionResult loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
             return loaded[0]
 
     def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:

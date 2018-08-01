@@ -23,7 +23,7 @@ class TestWorker(TorchTestCase):
         progress_queue = AsyncQueue()
         result_queue = AsyncQueue()
         worker = Worker(num, f=self.f, inps=(self.inp,), correct_outs=(self.correct_out,),
-                        start_option_attr=Vectorizer.parse_option_str(str(tc.MappingOptions('naive'))),
+                        start_option_res=Vectorizer.parse_option_str(str(tc.MappingOptions('naive'))),
                         progress_queue=progress_queue, result_queue=result_queue)
         worker.start()
 
