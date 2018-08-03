@@ -8,7 +8,8 @@ from asyncio import sleep
 from collections import abc
 from datetime import datetime
 from functools import lru_cache
-from typing import Sequence
+from multiprocessing import sharedctypes
+from typing import Sequence, MutableSequence
 
 import numpy as np
 import tensor_comprehensions as tc
@@ -26,7 +27,7 @@ from .stats import TunerStats
 
 
 class ChildTuner(Worker):
-    __slots__ = 'tuner_config', '_f', '_start_option_res', '_inps', '_correct_out', 'progress', 'msg_bus'
+    __slots__ = 'tuner_config', '_f', '_inps', '_correct_out', '_start_option_res', '_msg_bus', '_done', '_started_at'
 
     RTOL = 1e-3 if settings.DEFAULT_TYPE.lower() == 'float' else 1e-9
     NOT_VIABLE: float = float('inf')
@@ -35,35 +36,44 @@ class ChildTuner(Worker):
     TUNER_CONFIG = tc.TunerConfig().pop_size(2).generations(1).crossover_rate(1).mutation_rate(3)
 
     def __init__(self,
-                 round: int,
+                 num: int,
                  msg_bus: MessageBus,
                  f: FunctionWithParams,
                  inps: Sequence[Tensor],
                  correct_outs: Sequence[Tensor],
                  start_option_res: OptionResult):
         super(Worker, self).__init__()
-        self._start_option_res = start_option_res
         self._f = f
         self._inps = inps
         self._correct_out = correct_outs
+        self._msg_bus = msg_bus
 
-        self.msg_bus = msg_bus
-        self.progress = self.msg_bus._manager.Namespace()
-        self.progress.remaining_round = round
-        self.progress.option_res = start_option_res
-        self.progress.done = False
+        self._done = multiprocessing.sharedctypes.RawValue('b', False)
+        self._num = multiprocessing.sharedctypes.RawValue('i', num)
+        self.__start_option_res: MutableSequence[float] \
+            = multiprocessing.sharedctypes.RawArray('f', Vectorizer.LEN)
+
+        if isinstance(start_option_res, tc.MappingOptions):
+            # todo logging warning
+            start_option_res = OptionResult(start_option_res)
+        self._start_option_res = start_option_res
+        self._started_at = sharedctypes.RawValue('f', float('nan'))
 
     @property
     def done(self):
-        return self.progress.done
+        return self._done.value
+
+    @property
+    def started_at(self):
+        return self._started_at.value
 
     def run(self):
         f = self._f
         inps = self._inps
         start_option_res = self._start_option_res
 
-        for _ in range(self.progress.remaining_round):
-            self.msg_bus.started(start_option_res, self.pid)
+        for _ in range(self._num.value):
+            self._started_at.value = int(time.time())
 
             with gpu_lock:
                 option = f.tune_options(
@@ -78,7 +88,7 @@ class ChildTuner(Worker):
             except RuntimeError as e:
                 option_res.exc = e
                 option_res.speed = self.NOT_VIABLE
-                self.msg_bus.add_result(option_res)
+                self._msg_bus.add_result(option_res)
                 traceback.print_exc()
                 del e
             else:
@@ -95,7 +105,7 @@ class ChildTuner(Worker):
                 except AssertionError as e:
                     option_res.exc = e
                     option_res.speed = self.NOT_VIABLE
-                    self.msg_bus.add_result(option_res)
+                    self._msg_bus.add_result(option_res)
                     traceback.print_exc()
                     del e
                 else:
@@ -111,31 +121,31 @@ class ChildTuner(Worker):
                         end = timer()
 
                     option_res.speed = end - start
-                    self.msg_bus.add_result(option_res)
+                    self._msg_bus.add_result(option_res)
                     start_option_res = option_res
 
-                    self.progress.remaining_round -= 1
-                    self.progress.option_res = start_option_res
+                    self._num.value -= 1
+                    self._start_option_res = start_option_res
 
-        self.progress.done = True
+        self._done = True
 
     def reincarnate(self):
-        return Worker(
-            round=self.progress.remaining_round,
-            msg_bus=self.msg_bus,
+        return ChildTuner(
+            num=self._num,
+            msg_bus=self._msg_bus,
             f=self._f,
             inps=self._inps,
             correct_outs=self._correct_out,
-            start_option_res=self.progress.option_res, )
+            start_option_res=self._start_option_res)
 
 
 class Tuner:
     __slots__ = '_workers', '_evaluator', '_f', '_inps', '_correct_outs', \
-                '_collect_results_config', 'msg_bus', \
-                '_save_result_config', '_stats', '_main_async_config', 'start_option_attr'
+                '_collect_results_config', '_msg_bus', \
+                '_save_result_config', '_stats', '_main_async_config', 'start_option_res'
 
     NUM_RUNNER = multiprocessing.cpu_count()
-    NOT_VIABLE: float = Worker.NOT_VIABLE
+    NOT_VIABLE: float = ChildTuner.NOT_VIABLE
 
     def __init__(self,
                  f: FunctionWithParams,
@@ -143,21 +153,22 @@ class Tuner:
                  correct_outs: Sequence[Tensor],
                  start_option: tc.MappingOptions,
                  name: str = None):
-        super(Tuner, self).__init__()
-        self.start_option_attr = Vectorizer.parse_option_str(str(start_option))
+        name = (name or f.entry_point) + '_tuner'
+
+        self.start_option_res = OptionResult(start_option)
 
         self._f = f
         self._inps = inps
         self._correct_outs = correct_outs
         self._f.logger.setLevel(logging.WARNING)
-        self.msg_bus = MessageBus()
+        self._msg_bus = MessageBus(name=name)
         self._evaluator = Evaluator()
 
         self._main_async_config = [3, 1.001, 3]
         self._save_result_config = [30, 1.001, 1 / 8]
 
-        self._stats = TunerStats(name=(name or self._f.entry_point))
-        self._workers = []
+        self._stats = TunerStats(name=name)
+        self._workers: MutableSequence[ChildTuner] = []
 
     @property
     @lru_cache(maxsize=None)
@@ -170,10 +181,10 @@ class Tuner:
     def save_dir(self):
         return os.path.join(SAVE_DIR, self._stats.name)
 
-    def _make_worker(self, round: int, start_option_attr: Vectorizer.OptionAttr = None) -> ChildTuner:
+    def _make_worker(self, num: int, start_option_res: OptionResult = None) -> ChildTuner:
         return ChildTuner(f=self._f, inps=self._inps, correct_outs=self._correct_outs,
-                          start_option_res=start_option_attr or self.start_option_attr,
-                          round=round, msg_bus=self.msg_bus)
+                          start_option_res=start_option_res or self.start_option_res,
+                          num=num, msg_bus=self._msg_bus)
 
     @staticmethod
     def check_exception(f: asyncio.Future):
@@ -192,11 +203,11 @@ class Tuner:
             os.makedirs(self.save_dir)
 
         while True:
-            while self.msg_bus.result_len() > 0:
+            while self._msg_bus.result_len() > 0:
                 delay /= backoff ** recovery_bias
 
                 with open(datetime.now().strftime('%Y-%m-%d %X'), 'w') as f:
-                    opt_res = self.msg_bus.pop_result()
+                    opt_res = self._msg_bus.pop_result()
                     stats.log_option(opt_res)
 
                     async with gpu_lock:
@@ -212,6 +223,7 @@ class Tuner:
                 evaluator.apply_grad()
             await sleep(delay)
             delay *= backoff
+            self._save_result_config[0] = delay
 
     async def monitor(self):
         stats = self._stats
@@ -225,30 +237,35 @@ class Tuner:
                               gpu_lock_queue._get_retry_delay,
                               gpu_lock_queue._exponential_backoff,
                               gpu_lock_queue.RECOVERY_BIAS)
+            stats.async_stats('save_results', *self._save_result_config)
 
             await asyncio.sleep(.2)
 
     async def main(self, num: int):
-        self._stats.start()
         work = asyncio.gather(self.monitor(),
+                              self._msg_bus.monitor(),
+                              self._msg_bus.kill_zombie(),
                               self.save_results(),
                               loop=EVENT_LOOP)
         asyncio.ensure_future(work, loop=EVENT_LOOP)
 
         try:
-            self._workers.extend(self._make_worker(num) for _ in range(self.NUM_RUNNER))
+            self._workers.extend(
+                self._make_worker(num, start_option_res=self.start_option_res) for _ in range(self.NUM_RUNNER)
+            )
+            self.logger.info('Starting workers...')
             tuple(w.start() for w in self._workers)
+            self.logger.info('Workers started')
 
             while True:
                 if any(w.is_alive() for w in self._workers):
                     self.check_exception(work)
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(3)
                 else:
                     self._workers.clear()
                     break
         finally:
             self._stats.flush()
-            self._stats.stop()
 
             self.check_exception(work)
 

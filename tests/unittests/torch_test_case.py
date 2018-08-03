@@ -66,8 +66,8 @@ class TorchTestCase(unittest.TestCase):
 
         if actual.shape == desired.shape:
             self.logger.info(f"Max Absolute difference: {(actual - desired).max()}")
+            current_setting = np.seterr(divide='ignore', invalid='ignore')
             try:
-                current_setting = np.seterr(divide='ignore', invalid='ignore')
                 self.logger.info(
                     f"Max relative difference: {np.divide((actual - desired), desired).max()}")
             finally:

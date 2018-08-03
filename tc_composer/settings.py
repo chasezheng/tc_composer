@@ -38,6 +38,7 @@ else:
 
 @lru_cache(maxsize=None)
 def get_configured_logger(name: str, format: str = None):
+    # todo make more formatting option available
     if UNIT_TESTING:
         format = format or '[%(levelname)s] %(name)s.%(funcName)s L.%(lineno)d - %(message)s'
     else:
@@ -62,7 +63,7 @@ LOGGER.info(f'Setting default tensor type: {DEFAULT_TENSOR}')
 LOGGER.info(f'Setting epsilon: {EPSILON}')
 LOGGER.info(f'Input tensor shape checking: {CHECKING_SHAPE}')
 LOGGER.info(f'Saving compiled options in: {OPTIONS_DIR}')
-LOGGER.info(f"Current CUDA device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
+#LOGGER.info(f"Current CUDA device: {torch.cuda.get_device_name(torch.cuda.current_device())}")
 if 'double' in DEFAULT_TENSOR.lower() and BENCHMARKING:
     LOGGER.warning("Using double tensors in benchmark mode.")
 

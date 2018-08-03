@@ -6,7 +6,7 @@ from collections import abc
 from collections import deque
 from functools import lru_cache
 from itertools import repeat
-from typing import Iterable, Tuple, TypeVar, Sequence, MutableSequence, Mapping, Any, MutableSet
+from typing import Iterable, Tuple, TypeVar, Sequence, Any
 
 import tensor_comprehensions as tc
 import torch
@@ -123,14 +123,21 @@ class Proposer(Module):
             nn.Linear(in_features=32, out_features=num_proposals * Vectorizer.LEN),
             Decorrelation(Vectorizer.LEN)
         )
-        self.optimizers.append(optim.RMSprop(self.parameters(), lr=1e-3))
+        self.optimizers.append(optim.RMSprop(self.parameters()))
+
+        for p in self._proposer.parameters():
+            p.data.div_(10)
 
         initial_bias = Vectorizer.from_mapping_options(start_option)
         initial_bias = torch.cat(tuple(repeat(initial_bias, num_proposals)))
         tuple(self._proposer.parameters())[-1].data = initial_bias
 
-    def forward(self, inp: Tensor) -> Tensor:
-        return self._proposer(inp).view(-1, Vectorizer.LEN)
+    def forward(self, inp: Tensor) -> Tuple[Tensor, Sequence[tc.MappingOptions]]:
+        ts =  self._proposer(inp).view(-1, Vectorizer.LEN)
+        opts = []
+        for t in ts:
+            opts.append(Vectorizer.to_mapping_options(t))
+        return ts, tuple(opts)
 
 
 class Evaluator(Module):
@@ -215,7 +222,7 @@ class Vectorizer:
 
     @staticmethod
     def remove_trailing_zeros(seq):
-        if 0 not in seq:
+        if 0 not in seq:  # todo not continuous
             return seq
         return seq[:seq.index(0)]
 
@@ -254,7 +261,8 @@ class Vectorizer:
         def tensor_yielder():
             for attr, mytype, length in cls.CONFIG:
                 if mytype is int:
-                    out = cls.from_ints((attr_dict[attr],) if isinstance(attr_dict[attr], int) else attr_dict[attr])
+                    out = cls.from_ints(
+                        (attr_dict[attr],) if isinstance(attr_dict[attr], int) else attr_dict[attr])
                     if len(out) < length:
                         out = torch.cat((out, torch.zeros(length - len(out))))
                 else:
@@ -266,7 +274,8 @@ class Vectorizer:
         return torch.cat(tuple(tensor_yielder()))
 
     @classmethod
-    def from_attr_to_opt(cls, pairs: Sequence[Tuple[str, Any]], opt: tc.MappingOptions = None) -> tc.MappingOptions:
+    def from_attr_to_opt(cls, pairs: Sequence[Tuple[str, Any]],
+                         opt: tc.MappingOptions = None) -> tc.MappingOptions:
         opt = opt or tc.MappingOptions('naive')
         for k, v in pairs:
             getattr(opt, k)(v)
@@ -328,7 +337,8 @@ class Vectorizer:
     # Sanity checks
     for attr, mytype, length in CONFIG:
         assert length > 0, f"attr = {attr}; mytype = {mytype}; length = {length}"
-        assert mytype is int or isinstance(mytype, abc.Sequence), f"attr = {attr}; mytype = {mytype}; length = {length}"
+        assert mytype is int or isinstance(mytype,
+                                           abc.Sequence), f"attr = {attr}; mytype = {mytype}; length = {length}"
         assert isinstance(attr, str), f"attr = {attr}; mytype = {mytype}; length = {length}"
 
         del attr, mytype, length

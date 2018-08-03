@@ -4,7 +4,7 @@ from torch import Tensor, optim, nn
 
 from tc_composer.func.affine_transform import AffineTransform
 from tc_tuner.async_queue import AsyncQueue
-from tc_tuner.modules import Vectorizer, Decorrelation
+from tc_tuner.modules import Vectorizer, Decorrelation, Evaluator, Proposer
 from ..torch_test_case import TorchTestCase
 
 
@@ -31,7 +31,7 @@ class TestVectorizer(TorchTestCase):
             self.assertEqual(str(o), str(Vectorizer.from_attr_to_opt(Vectorizer.parse_option_str(str(o)))))
 
     def test_to_ints_from_ints(self):
-        inp = tuple(range(10000))
+        inp = tuple(range(0, 10000, 11))
         self.assert_allclose(inp, Vectorizer.to_ints(Vectorizer.from_ints(inp)), atol=1e-15)
         with self.assertRaises(AssertionError):
             Vectorizer.from_ints((-1,))
@@ -126,3 +126,18 @@ class TestDecorrelation(TorchTestCase):
 class TestProposer(TorchTestCase):
     def setUp(self):
         pass
+
+
+class TestProposerEvaluator(TorchTestCase):
+    def setUp(self):
+        self.in_features = 4
+
+        self.evaluator = Evaluator()
+        self.proposer = Proposer(in_features=self.in_features)
+
+    def test_run(self):
+        a, b = self.proposer(torch.randn(self.in_features))
+
+        self.evaluator.loss.append(
+            (self.evaluator(a) - 100).abs().sum().backward()
+        )

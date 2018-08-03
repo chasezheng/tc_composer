@@ -16,6 +16,7 @@ class TunerStats:
     _PREFIX = set()
 
     _STATS = ThreadStats()
+    _STATS.start()
 
     def __init__(self, name: str):
         assert name not in self._PREFIX, f"name={name} already exists."
@@ -27,20 +28,22 @@ class TunerStats:
             metric_name=f"{metric_name}",
             value=value,
             timestamp=timestamp,
-            tags=(*tags, 'name:{}'.format(self.name)),
+            tags=(*tags, f'name:{self.name}'),
             sample_rate=sample_rate,
             host=host
         )
 
-    def increment(self, metric_name, value=1, timestamp=None, tags=None, sample_rate=1, host=None):
+    def increment(self, metric_name, value=1, timestamp=None, tags=(), sample_rate=1, host=None):
         return self._STATS.increment(
-            metric_name=f"{self.name}.{metric_name}",
+            metric_name=f"{metric_name}",
             value=value,
             timestamp=timestamp,
-            tags=tags,
+            tags=(*tags, f'name:{self.name}'),
             sample_rate=sample_rate,
             host=host
         )
+
+    flush = staticmethod(_STATS.flush)
 
     def async_stats(self, key: str, delay: float, backoff: float, recovery_bias: float) -> None:
         self.gauge("async_stats.delay", delay, tags=[f'key:{key}'])

@@ -1,76 +1,99 @@
 import asyncio
 import logging
+import multiprocessing
+import os
+import sys
 import time
-import traceback
-from asyncio import sleep
 from collections import abc
-from datetime import datetime
 from functools import lru_cache
 from itertools import chain
-from typing import Sequence, Tuple, MutableSequence
+from multiprocessing import sharedctypes
+from typing import Sequence
 
 import numpy as np
 import tensor_comprehensions as tc
 import torch
-from torch import Tensor, autograd, multiprocessing
+from torch import Tensor, autograd
 
 from tc_composer import settings
 from tc_composer.func.function_with_params import FunctionWithParams
-from .async_queue import AsyncQueue
+from . import async_util
 from .gpu_lock import gpu_lock
+from .message_bus import MessageBus, Worker
 from .modules import Proposer, Evaluator, Vectorizer
-from .settings import EVENT_LOOP, get_configured_logger
+from .option_result import OptionResult
+from .settings import EVENT_LOOP, get_configured_logger, SAVE_DIR
 from .stats import TunerStats
 
 
-class Worker(multiprocessing.Process):
-    __slots__ = '_result_queue', '_progress_queue', '_f', '_option_queue', '_inps', '_correct_out'
+class ChildTuner(Worker):
+    __slots__ = '_f', '_inps', '_correct_outs', '_msg_bus', '_started_at'
 
     RTOL = 1e-3 if settings.DEFAULT_TYPE.lower() == 'float' else 1e-9
     NOT_VIABLE = float('inf')
     SAMPLE_SIZE = 10
 
     def __init__(self,
-                 option_queue: AsyncQueue[Vectorizer.OptionAttr],
-                 progress_queue: AsyncQueue[Tuple[Vectorizer.OptionAttr, datetime, int]],
-                 result_queue: AsyncQueue[Vectorizer.OptionAttr, float],
                  f: FunctionWithParams,
                  inps: Sequence[Tensor],
-                 correct_outs: Sequence[Tensor]):
-        super(Worker, self).__init__()
-        self._option_queue = option_queue
-        self._progress_queue = progress_queue
-        self._result_queue = result_queue
+                 correct_outs: Sequence[Tensor],
+                 msg_bus: MessageBus):
+        super(ChildTuner, self).__init__()
         self._f = f
         self._inps = inps
-        self._correct_out = correct_outs
+        self._correct_outs = correct_outs
+        self._msg_bus = msg_bus
+        self._started_at = sharedctypes.RawValue('f', float('nan'))
+        self._current_opt = sharedctypes.RawArray('f', Vectorizer.LEN)
+
+    @property
+    def done(self):
+        return False
+
+    @property
+    def started_at(self) -> float:
+        return self._started_at.value
+
+    def reincarnate(self):
+        return ChildTuner(f=self._f, inps=self._inps,
+                          correct_outs=self._correct_outs, msg_bus=self._msg_bus)
 
     def run(self):
         f = self._f
         inps = self._inps
-        try:
-            while True:
-                option_attrs = self._option_queue.get()
-                self._progress_queue.put((option_attrs, datetime.now(), self.pid))
 
+        while True:
+            task = asyncio.ensure_future(self._msg_bus.aget_queue())
+            EVENT_LOOP.run_until_complete(task)  # todo abstract this
+            opt_res: OptionResult = task.result()
+            self._current_opt[:Vectorizer.LEN] = opt_res.to_tensor().data.tolist()
+            self._started_at.value = int(time.time())
+
+            opt_res.speed = self.NOT_VIABLE  # Until proven otherwise
+            try:
+                f.recompile(*inps, option=opt_res.option)
+            except RuntimeError:
+                opt_res.exc = sys.exc_info()[1]
+                opt_res.speed = self.NOT_VIABLE
+            except:
+                opt_res.exc = sys.exc_info()[1]
+                opt_res.speed = self.NOT_VIABLE
+                raise
+            else:
                 try:
-                    f.recompile(*inps, option=Vectorizer.from_attr_to_opt(option_attrs))
-                except RuntimeError:
-                    self._result_queue.put((option_attrs, self.NOT_VIABLE))
-                else:
                     # Check correctness
                     with gpu_lock:
-                        try:
-                            out = f(*inps)
-                            if isinstance(out, abc.Sequence):
-                                for t, t0 in zip(out, self._correct_out):
-                                    np.testing.assert_allclose(t.data, t0.data, rtol=self.RTOL)
-                            else:
-                                np.testing.assert_allclose(out.data, self._correct_out[0].data,
-                                                           rtol=self.RTOL)
-                        except AssertionError:
-                            self._result_queue.put((option_attrs, self.NOT_VIABLE))
-
+                        out = f(*inps)
+                        if isinstance(out, abc.Sequence):
+                            for t, t0 in zip(out, self._correct_outs):
+                                np.testing.assert_allclose(t.data, t0.data, rtol=self.RTOL)
+                        else:
+                            np.testing.assert_allclose(out.data, self._correct_outs[0].data,
+                                                       rtol=self.RTOL)
+                except AssertionError:
+                    opt_res.exc = sys.exc_info()[1]
+                    opt_res.speed = self.NOT_VIABLE
+                else:
                     # Benchmark
                     with gpu_lock:
                         synchronize = torch.cuda.synchronize
@@ -83,32 +106,34 @@ class Worker(multiprocessing.Process):
                         synchronize()
                         end = timer()
 
-                    self._result_queue.put((option_attrs, start - end))
-        finally:
-            print('Exiting')
+                    opt_res.speed = end - start
+            finally:
+                opt_res.compile_time = int(time.time()) - self.started_at
+                self._msg_bus.add_result(opt_res)
+
+    def terminate(self):
+        opt_res = OptionResult(Vectorizer.to_mapping_options(Tensor(self._current_opt)))
+        opt_res.speed = self.NOT_VIABLE
+        self._msg_bus.add_result(opt_res)
+        super(ChildTuner, self).terminate()
 
 
 class Tuner:
-    __slots__ = '_option_queue', '_progress_queue', '_result_queue', '_workers', '_proposer', \
-                '_evaluator', '_f', '_inps', '_correct_outs', '_in_sizes', '_collected_results', \
-                '_collected_progress', '_collect_results_config', '_get_result_config', \
-                '_stats', '_make_options_async_config'
+    __slots__ = '_proposer', '_evaluator', '_f', '_inps', '_correct_outs', '_in_sizes', \
+                '_stats', '_make_options_async_config', '_save_result_config', '_msg_bus', '_tasks'
 
     MAX_COMPILE_TIME = 180
     NUM_RUNNER = multiprocessing.cpu_count()
 
-    NOT_VIABLE = Worker.NOT_VIABLE
+    NOT_VIABLE = ChildTuner.NOT_VIABLE
 
     def __init__(self, f: FunctionWithParams,
                  inps: Sequence[Tensor], correct_outs: Sequence[Tensor],
                  start_option: tc.MappingOptions = None,
                  prefix: str = None):
         super(Tuner, self).__init__()
-        self._option_queue = AsyncQueue()
-        self._progress_queue = AsyncQueue()  # todo when will this queue size be larger than NUM_RUNNER?
-        self._result_queue = AsyncQueue()
-        self._collected_progress: MutableSequence[Tuple[Vectorizer.OptionAttr, datetime, int]] = []
-        self._collected_results: MutableSequence[Tuple[Vectorizer.OptionAttr, float]] = []
+        name = (prefix or f.entry_point) + '_tuner'
+        self._msg_bus = MessageBus(name=name)
 
         in_sizes = tuple(chain(*(inp.shape for inp in inps)))
         self._in_sizes = Tensor(in_sizes)
@@ -121,14 +146,10 @@ class Tuner:
         self._correct_outs = correct_outs
 
         self._make_options_async_config = [3, 1.001, 3]
-        self._collect_results_config = [.2, 1.0005, 3]
-        self._get_result_config = [.2, 1.0005, 3]
+        self._save_result_config = [30, 1.001, 1 / 8]
 
-        self._workers = [self._make_worker() for _ in range(self.NUM_RUNNER)]
-        for w in self._workers:
-            w.start()
-
-        self._stats = TunerStats(name=(prefix or f.entry_point) + '_tuner')
+        self._stats = TunerStats(name=name)
+        self._tasks = []
 
     @property
     @lru_cache(maxsize=None)
@@ -137,135 +158,48 @@ class Tuner:
             self._f.entry_point + '_tuner',
             format='[%(levelname)s] %(name)s.%(funcName)s L.%(lineno)d - %(message)s')
 
-    def _make_worker(self) -> Worker:
-        return Worker(option_queue=self._option_queue, progress_queue=self._progress_queue,
-                      result_queue=self._result_queue, f=self._f, inps=self._inps,
-                      correct_outs=self._correct_outs)
+    @property
+    def save_dir(self):
+        return os.path.join(SAVE_DIR, self._stats.name)
 
-    @staticmethod
-    def check_exception(f: asyncio.Future):
-        if f.cancelled() or (not f.done()):
-            return
-        e = f.exception()
-        if e is not None:
-            raise e
-
-    def put_result(self, opt, t):
-        self._collected_results.append((opt, t))
-
-    def pop_progress(self, opt) -> Tuple[datetime, int]:
-        for n, (o, dt, pid) in enumerate(self._collected_progress):
-            if opt == o:
-                self._collected_progress.pop(n)
-                return dt, pid
-        raise Exception
-
-    async def get_result(self, opt) -> float:
-        delay, backoff, recovery_bias = self._get_result_config
-        while True:
-            for o, t in self._collected_results:
-                if o == opt:
-                    self._get_result_config[0] = delay / (backoff ** recovery_bias)
-                    return t
-            await sleep(delay)
-            delay *= backoff
-
-    async def collect_results(self):
-        stats = self._stats
-        progress_queue = self._progress_queue
-        result_queue = self._result_queue
-        collected_progress = self._collected_progress
-        delay, backoff, recovery_bias = self._collect_results_config
-
-        mean_compile_time = 300
-        moment_2nd_compile_time = mean_compile_time ** 2
-
-        while True:
-            progress_qsize = progress_queue.qsize()
-            self.logger.info(f'progress_qsize: {progress_qsize}')
-            for _ in range(progress_qsize):
-                collected_progress.append(await progress_queue.aget())
-            stats.queue_passage('progress', value=progress_qsize)
-            delay /= (backoff ** progress_qsize)
-
-            result_qsize = result_queue.qsize()
-            self.logger.info(f'result_qsize: {result_qsize}')
-            for _ in range(result_qsize):
-                opt, t = await result_queue.aget()
-                now = datetime.now()
-                mean_compile_time = .99 * mean_compile_time + .01 * (
-                        now - self.pop_progress(opt)[0]).total_seconds()
-                moment_2nd_compile_time = .99 * moment_2nd_compile_time + .01 * (
-                        (now - self.pop_progress(opt)[0]).total_seconds() ** 2)
-                self.put_result(opt, t)
-            stats.queue_passage('result', value=result_qsize)
-            delay /= (backoff ** result_qsize)
-
-            now = datetime.now()
-            for n, (opt, dt, pid) in tuple(enumerate(collected_progress)):
-                if (now - dt).total_seconds() > mean_compile_time + 2 * (
-                        (moment_2nd_compile_time - mean_compile_time ** 2) ** .5):
-                    worker = self._workers[tuple(w.pid for w in self._workers).index(pid)]
-                    worker.terminate()
-                    self._workers[self._workers.index(worker)] = self._make_worker()
-                    collected_progress.pop(n)
-                    self.put_result(opt, self.NOT_VIABLE)
-                    stats.increment('worker_died')
-
-            await asyncio.sleep(delay)
-            delay *= backoff ** (1 / recovery_bias)
-            self._collect_results_config[0] = delay
-            stats.async_stats('progress', delay, backoff, recovery_bias)
-            stats.gauge('compile_time', mean_compile_time, tags=['key:mean'])
-            stats.gauge('compile_time',
-                        mean_compile_time - ((moment_2nd_compile_time - mean_compile_time ** 2) ** .5),
-                        tags=['key:-sd'])
-            stats.gauge('compile_time',
-                        mean_compile_time + ((moment_2nd_compile_time - mean_compile_time ** 2) ** .5),
-                        tags=['key:+sd'])
+    def _make_worker(self) -> ChildTuner:
+        return ChildTuner(msg_bus=self._msg_bus, f=self._f, inps=self._inps,
+                          correct_outs=self._correct_outs)
 
     async def monitor(self):
         stats = self._stats
-        option = self._option_queue
-        progress = self._progress_queue
-        result = self._result_queue
-
-        collect_results_config = self._collect_results_config
-
         gpu_lock_queue = gpu_lock._LOCK_QUEUE
 
         while True:
             stats.resource_usage()
-
-            stats.queue_size('option', option.qsize())
-            stats.queue_size('progress', progress.qsize())
-            stats.queue_size('result', result.qsize())
-            stats.gauge('workers_alive', sum(1 for w in self._workers if w.is_alive()))
-
-            stats.gauge('collected', len(self._collected_progress), tags=['key:progress'])
-            stats.gauge('collected', len(self._collected_results), tags=['key:result'])
-
-            stats.async_stats('evaluate_option0', *collect_results_config)
             stats.async_stats('gpu_lock',
-                              gpu_lock_queue.get_delay,
-                              gpu_lock_queue.exponential_backoff,
+                              gpu_lock_queue._get_retry_delay,
+                              gpu_lock_queue._exponential_backoff,
                               gpu_lock_queue.RECOVERY_BIAS)
+
+            for t in tuple(self._tasks):
+                if t.cancelled():
+                    self._tasks.remove(t)
+                elif t.done():
+                    async_util.check_exception(t)
+                    self._tasks.remove(t)
 
             await asyncio.sleep(.2)
 
-    async def evaluate_option(self, t: Tensor) -> None:
+    async def evaluate_option(self, t: Tensor, opt: tc.MappingOptions) -> None:
         assert len(t.shape) == 1 and t.shape[0] == Vectorizer.LEN, \
             f"t.shape = {t.shape}; Vectorizer.LEN = {Vectorizer.LEN}"
         self._stats.increment('progress', tags=['key:starting'])
-        try:
-            option_attr = Vectorizer.parse_option_str(str(Vectorizer.to_mapping_options(t)))
-        except RuntimeError:
-            traceback.print_exc()
-            return
-        else:
-            self._option_queue.put(option_attr)
 
-        actual_t = await self.get_result(option_attr)
+        opt_res = OptionResult(opt)
+        self._msg_bus.queue(opt_res)
+
+        t0 = int(time.time())
+        opt_res = await self._msg_bus.find_and_pop(opt_res)
+        t1 = int(time.time())
+        self.logger.info(f'Refreshed opt_res in {t1-t0} secs')
+
+        actual_t = opt_res.speed
         self._stats.increment('progress', tags=['key:result_collected'])
 
         async with gpu_lock:
@@ -287,85 +221,66 @@ class Tuner:
                     p.requires_grad = False
 
                 if actual_t == self.NOT_VIABLE:
+                    predicted_t.backward(retain_graph=True)
+                else:
                     with autograd.set_grad_enabled(False):
                         r = actual_t / predicted_t
                     (predicted_t * r).backward(retain_graph=True)
-                else:
-                    predicted_t.backward(retain_graph=True)
             finally:
                 for p in self._evaluator.parameters():
                     p.requires_grad = True
 
         self._stats.increment('progress', tags=['key:option_evaluated'])
 
-    async def make_options(self, num: int):
-        monitor = asyncio.gather(self.monitor(),
-                                 self.collect_results(),
-                                 loop=EVENT_LOOP)
-        asyncio.ensure_future(monitor, loop=EVENT_LOOP)
+    @async_util.repeat
+    async def make_options(self):
+        diff = self._msg_bus.queue_msg_num() - 2*self.NUM_RUNNER
+        if diff > 0:
+            return async_util.Repeat.DelayFactor(diff)
 
-        stats = self._stats
-        delay, backoff, recovery_bias = self._make_options_async_config
-        tasks = []
+        async with gpu_lock:
+            ts, opts = self._proposer(self._in_sizes)
+            with torch.autograd.set_grad_enabled(False):
+                ts_with_noise = ts + torch.normal(0, std=ts / 40)
+                opts_with_noise = (Vectorizer.to_mapping_options(t) for t in ts_with_noise)
+
+        return (*zip(ts, opts), *zip(ts_with_noise, opts_with_noise))
+
+    async def _apply_grad(self):
+        async with gpu_lock:
+            self._proposer.apply_grad()
+            self._evaluator.apply_grad()
+
+    async def main(self, num: int):
+        workers = tuple(self._make_worker() for _ in range(self.NUM_RUNNER))
+        for w in workers:
+            w.start()
+        house_keeping = asyncio.gather(self.monitor(),
+                                       self._msg_bus.monitor(),
+                                       async_util.Repeat.monitor(),
+                                       self._msg_bus.kill_zombie(*workers),
+                                       loop=EVENT_LOOP)
+        house_keeping = asyncio.ensure_future(house_keeping, loop=EVENT_LOOP)
+        del workers  # Removing this reference, since the list of workers would not be updated, in case zombies are killed
 
         for _ in range(num):
-            async with gpu_lock:
-                options = self._proposer(self._in_sizes).view(-1, Vectorizer.LEN)
-                with torch.autograd.set_grad_enabled(False):
-                    options_with_noise = options + torch.normal(0, std=options / 10)
+            out = await self.make_options()
+            async_util.check_exception(house_keeping)
 
-            task = asyncio.gather(*(self.evaluate_option(o) for o in (*options, *options_with_noise)),
-                                  loop=EVENT_LOOP)
-            tasks.append(task)
-
-            def done_callback(*x):
-                if tuple(self._evaluator.parameters())[-1].grad.abs().sum().item() == 0:
-                    raise Exception
-                if tuple(self._proposer.parameters())[-1].grad.abs().sum().item() == 0:
-                    raise Exception
-                if not tuple(self._proposer.parameters())[0].requires_grad:
-                    raise Exception
-                if not tuple(self._evaluator.parameters())[0].requires_grad:
-                    raise Exception
-                self._proposer.apply_grad()
-                self._evaluator.apply_grad()
-
-            task.add_done_callback(done_callback)
-            asyncio.ensure_future(task, loop=EVENT_LOOP)
-
-            while self._option_queue.qsize() > len(options):
-                await asyncio.sleep(delay)
-                delay *= backoff
-            delay /= backoff ** recovery_bias
-            self._make_options_async_config[0] = delay
-            stats.async_stats('main', delay, backoff, recovery_bias)
-
-            self.check_exception(monitor)
-            if tasks[0].cancelled():
-                del tasks[0]
-            elif tasks[0].done():
-                self.check_exception(tasks.pop(0))
-
-            self.logger.info(f'round {_} done')
-            stats.flush()
-            await asyncio.sleep(.1)
-
-        while len(tasks) > 0:
-            await asyncio.sleep(1)
-            if tasks[0].cancelled():
-                del tasks[0]
-            elif tasks[0].done():
-                self.check_exception(tasks.pop(0))
-        self.check_exception(monitor)
+            self._tasks.append(
+                asyncio.ensure_future(
+                    async_util.chain(
+                        asyncio.gather(*(self.evaluate_option(t, o) for t, o in out)),
+                        self._apply_grad())
+                )
+            )
 
     def run(self, num: int):
-        self._stats.start()
-        main = asyncio.Task(self.make_options(num), loop=EVENT_LOOP)
+        main = asyncio.Task(self.main(num), loop=EVENT_LOOP)
 
         try:
             EVENT_LOOP.run_until_complete(main)
         finally:
             self._stats.flush()
-            self._stats.stop()
 
-            self.check_exception(main)
+            async_util.check_exception(main)
