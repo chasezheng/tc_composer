@@ -1,9 +1,11 @@
 import asyncio
 import os
+from multiprocessing import Manager
 from torch import multiprocessing
 from tc_composer.settings import get_configured_logger
 import pickle
 
+SYNC_MANAGER = Manager()
 EVENT_LOOP: asyncio.BaseEventLoop = asyncio.get_event_loop()
 SAVE_DIR = os.path.join(os.path.expanduser('~'), __package__)
 DEFAULT_PICKLE_PROTOCOL = 4
