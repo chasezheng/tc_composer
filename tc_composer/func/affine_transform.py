@@ -76,6 +76,7 @@ class FusedAffineTransform(FunctionWithParams):
         else:
             assert len(in_names) == 1
             input = in_names[0]
+            assert input.dim == 2
         input.sizes[1].num = self.in_n
 
         def output_yielder():

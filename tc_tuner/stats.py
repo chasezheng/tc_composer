@@ -68,12 +68,13 @@ class TunerStats:
         self.gauge(f"option_perf", opt_res.speed)
 
         if len(self.best_10_options) < 10 or opt_res.speed < self.best_10_options[-1].speed:
+
             self.best_10_options.append(opt_res)
             self.best_10_options.sort(key=lambda x: x.speed)
             self.best_10_options: List[OptionResult] = self.best_10_options[:10]
             self._STATS.event(
-                title=f"New best 10 option: {opt_res.speed}",
-                text=str(opt_res.option),
+                title=f"New best 10 option",
+                text=f"speed: {opt_res.speed}\n{opt_res.option}",
                 alert_type='success',
                 aggregation_key='log_option'
             )

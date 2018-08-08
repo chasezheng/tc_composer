@@ -1,6 +1,6 @@
 import asyncio
 from collections import abc
-from functools import singledispatch, partial
+from functools import partial
 from typing import Callable, Coroutine, MutableSet
 
 from .stats import TunerStats
@@ -53,9 +53,9 @@ class Repeat(Callable[..., Coroutine]):
                     delay /= backoff ** recovery_bias
                     if last_exponent < 0:
                         # Same sign
-                        backoff **= 1.1
-                    elif last_exponent > 0:
-                        backoff **= 1 / 1.1
+                        backoff = (backoff + 1.01) / 2
+                    elif last_exponent > 0 or last_exponent == float('nan'):
+                        backoff = (backoff + 1.001) / 2
                     return out
 
                 await sleep(delay)
@@ -69,9 +69,9 @@ class Repeat(Callable[..., Coroutine]):
 
                 if exponent * last_exponent > 0:
                     # Same sign
-                    backoff **= 1.1
+                    backoff = (backoff + 1.01) / 2
                 elif exponent * last_exponent < 0:
-                    backoff **= 1 / 1.1
+                    backoff = (backoff + 1.001) / 2
                 last_exponent = exponent
 
                 self.retry_delay = delay
@@ -87,21 +87,13 @@ class Repeat(Callable[..., Coroutine]):
     async def monitor(cls):
         while True:
             for i in cls._INSTANCES:
-                cls._STATS.async_stats(key=i.f.__name__, delay=i.retry_delay,
+                cls._STATS.async_stats(key=i.f.__qualname__, delay=i.retry_delay,
                                        backoff=i.backoff, recovery_bias=i.recovery_bias)
             await asyncio.sleep(1)
 
 
-@singledispatch
-def repeat(*args, **kwargs):
-    raise NotImplementedError
-
-
-@repeat.register(abc.Callable)
-def __(f: Callable):
-    return Repeat(f)
-
-
-@repeat.register(float)
-def __(delay: float = .1, backoff: float = 1.005, recovery_bias: float = 3):
-    return lambda f: Repeat(f=f, retry_delay=delay, backoff=backoff, recovery_bias=recovery_bias)
+def repeat(f: Callable = None, delay: float = .1, backoff: float = 1.005, recovery_bias: float = 3):
+    if f is not None:
+        return Repeat(f=f, retry_delay=delay, backoff=backoff, recovery_bias=recovery_bias)
+    else:
+        return lambda f: Repeat(f=f, retry_delay=delay, backoff=backoff, recovery_bias=recovery_bias)

@@ -6,11 +6,11 @@ from asyncio import sleep
 from multiprocessing import sharedctypes
 from typing import MutableSequence, Tuple, TypeVar, List
 
-from .async_util import repeat, Repeat
+from .gpu_lock import gpu_lock
 from .option_result import OptionResult
 from .settings import get_configured_logger
 from .stats import TunerStats
-
+from . import async_util
 T = TypeVar('T')
 
 
@@ -31,7 +31,7 @@ class Worker(multiprocessing.Process, metaclass=ABCMeta):
 
 
 class MessageBus:
-    __slots__ = '_queued', '_result', '_compile_time', '_stats', 'refresh_result_config', \
+    __slots__ = '_queued', '_result', '_compile_time', '_stats', \
                 'aget_queue_config'
 
     _MEAN = 100
@@ -45,7 +45,6 @@ class MessageBus:
 
         self._stats = TunerStats(name=name)
 
-        self.refresh_result_config = [.1, 1.005, 3]
         self.aget_queue_config = [.1, 1.005, 3]
 
     @property
@@ -79,15 +78,14 @@ class MessageBus:
                 self.aget_queue_config[0] = delay / (backoff ** recovery_bias)
 
     def add_result(self, opt_res: OptionResult):
-        mean, _2nd_moment = self._compile_time
-
         if opt_res.compile_time not in (float('inf'), float('nan')):
-            mean = .99 * mean + .01 * opt_res.compile_time  # todo test
-            _2nd_moment = .99 * _2nd_moment + .01 * opt_res.compile_time ** 2
-            self._compile_time = mean, _2nd_moment
+            mean, _2nd_moment = self._compile_time
+            mean = .98 * mean + .02 * opt_res.compile_time  # todo test
+            _2nd_moment = .98 * _2nd_moment + .02 * opt_res.compile_time ** 2
+            self._compile_time[:2] = mean, _2nd_moment
 
         self._result.append(opt_res)
-        self.logger.info(f'Speed: {opt_res.speed}. Mean: {mean}')
+        self.logger.info(f'Option speed: {opt_res.speed}. Compile time: {opt_res.compile_time}')
         self._stats.queue_passage('result')
 
     def pop_result(self, idx: int = 0):
@@ -97,21 +95,16 @@ class MessageBus:
     def result_len(self):
         return len(self._result)
 
+    @async_util.repeat(recovery_bias=16)
     async def find_and_pop(self, opt_res: OptionResult) -> OptionResult:
-        delay, backoff, recovery_bias = self.refresh_result_config
         opt_str = str(opt_res.option)
 
-        try:
-            while True:
-                with self._result._mutex:  # todo test
-                    strs = tuple(str(r.option) for r in tuple(self._result))
-                    if opt_str in strs:
-                        delay /= (backoff ** recovery_bias)
-                        return self._result.pop(strs.index(opt_str))
-                await asyncio.sleep(delay)
-                delay *= backoff
-        finally:
-            self.refresh_result_config[0] = delay
+        with self._result._mutex:  # todo test
+            strs = tuple(str(r.option) for r in tuple(self._result))
+            if opt_str in strs:
+                return self._result.pop(strs.index(opt_str))
+            else:
+                return async_util.Repeat.DelayFactor(1)
 
     async def monitor(self):
         while True:
@@ -129,15 +122,22 @@ class MessageBus:
                     workers.remove(w)
 
             mean, _2nd_moment = self._compile_time
-            threshold = mean + 2 * (_2nd_moment - mean ** 2) ** .5
-            self.logger.info(f'threshold: {threshold}. mean: {mean}')
-            now = int(time.time())
+            sd = (_2nd_moment - mean ** 2) ** .5
+            threshold = max(mean + 10 * sd, 100)
+            self.logger.info(f'Mean compile time: {mean}. sd: {sd}')
+
+            self._stats.gauge('compile_time', mean, tags=[f'key:mean'])
+            self._stats.gauge('compile_time', sd, tags=[f'key:sd'])
+
+            now = int(time.perf_counter())
             for n, w in enumerate(tuple(workers)):
                 duration = now - w.started_at
-                if threshold < duration:
+                if threshold < duration or not w.is_alive():
+                    self.logger.info(f'Terminating worker {w.pid} with compile time {duration}.')
                     w.terminate()
                     new = w.reincarnate()
-                    new.start()
+                    async with gpu_lock:
+                        new.start()
                     workers[workers.index(w)] = new
                     self.logger.info('Worker died')
                     self._stats.increment('worker_died')

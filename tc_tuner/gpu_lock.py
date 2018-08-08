@@ -1,7 +1,5 @@
-import asyncio
-
 import torch
-from .settings import EVENT_LOOP
+
 from .async_queue import AsyncQueue
 
 
@@ -12,6 +10,7 @@ class _GPULock:
     _LOCK_QUEUE.put_nowait('gpu_lock')
 
     _GOTTEN: int = 0
+
     # todo duplicate logic
     @classmethod
     async def __aenter__(cls):

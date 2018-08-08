@@ -32,9 +32,9 @@ class TestVectorizer(TorchTestCase):
 
     def test_to_ints_from_ints(self):
         inp = tuple(range(0, 10000, 11))
-        self.assert_allclose(inp, Vectorizer.to_ints(Vectorizer.from_ints(inp)), atol=1e-15)
+        self.assert_allclose(inp, Vectorizer.to_positive_ints(Vectorizer.from_positive_ints(inp)), atol=1e-15)
         with self.assertRaises(AssertionError):
-            Vectorizer.from_ints((-1,))
+            Vectorizer.from_positive_ints((-1,))
 
     def test_to_class_from_class(self):
         classes = tuple(range(5))
@@ -136,8 +136,26 @@ class TestProposerEvaluator(TorchTestCase):
         self.proposer = Proposer(in_features=self.in_features)
 
     def test_run(self):
-        a, b = self.proposer(torch.randn(self.in_features))
+        t, b = self.proposer(torch.randn(self.in_features))
 
-        self.evaluator.loss.append(
-            (self.evaluator(a) - 100).abs().sum().backward()
-        )
+        predicted_t = self.evaluator(t)
+
+        (predicted_t - 100).abs().sum().backward()
+
+        self.assertEqual(predicted_t.shape[0], self.proposer._num_proposals)
+
+        def get_grad(mt):
+            if mt.grad is None:
+                return 0
+            return mt.grad.abs().sum().item()
+
+        for n, p in enumerate(self.proposer.parameters()):
+            try:
+                self.assertGreater(get_grad(p), 0)
+            except AssertionError:
+                self.logger.info(f'n={n}')
+        for n, p in enumerate(self.evaluator.parameters()):
+            try:
+                self.assertGreater(get_grad(p), 0)
+            except AssertionError:
+                self.logger.info(f'n={n}')

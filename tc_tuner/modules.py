@@ -10,7 +10,7 @@ from typing import Iterable, Tuple, TypeVar, Sequence, Any
 
 import tensor_comprehensions as tc
 import torch
-from torch import nn, Tensor, optim
+from torch import nn, Tensor, optim, autograd
 from torch.nn.functional import softmax
 
 from .settings import get_configured_logger
@@ -62,34 +62,45 @@ class Module(torch.nn.Module):
             m.step()
 
 
+# todo save and load and tests
+
 class Decorrelation(Module):
-    __slots__ = '_2nd_moment', 'in_n'
+    __slots__ = '_2nd_moment', 'in_n', '_mean', '_standardize'
 
     def __init__(self, in_n: int,
+                 standardize: bool = False,
                  coef: float = 1e-4):
         super(Decorrelation, self).__init__()
         self.in_n = in_n
-        self._2nd_moment: Tensor = 0
+        self._2nd_moment: Tensor = torch.zeros(1)
+        self._mean: Tensor = torch.zeros(1)
         self.coef = coef
+        self._standardize = standardize
 
     def forward(self, input: Tensor):
         input = input.view(-1, self.in_n)
         if self.training:
             self._2nd_moment = self._2nd_moment + torch.matmul(input.t(), input)
+            if self._standardize:
+                self._mean = self._mean + input.sum(0)
         if len(input) == 1:
             return input[0]
         return input
 
     def _iterate_loss(self):
         try:
-            d = self.scaled_abs_det(self._2nd_moment)
+            if self._standardize:
+                d = self.scaled_abs_det(self._2nd_moment - torch.matmul(self._mean.t(), self._mean))
+            else:
+                d = self.scaled_abs_det(self._2nd_moment)
         except RuntimeError:
             self.logger.error(traceback.format_exc())
             pass
         else:
-            self.loss.append(d.log().neg().mul(self.coef))
+            self.loss.append(d.pow(-1).neg().mul(self.coef))
         finally:
-            self._2nd_moment: Tensor = 0
+            self._2nd_moment: Tensor = torch.zeros(1)
+            self._mean: Tensor = torch.zeros(1)
 
         yield from super(Decorrelation, self)._iterate_loss()
 
@@ -115,20 +126,21 @@ class Proposer(Module):
         self._num_proposals = num_proposals
         self._proposer = nn.Sequential(
             nn.Linear(in_features=in_features, out_features=128),
-            nn.Dropout(),
             nn.Tanh(),
             nn.Linear(in_features=128, out_features=32),
             nn.Tanh(),
             Decorrelation(32),
             nn.Linear(in_features=32, out_features=num_proposals * Vectorizer.LEN),
-            Decorrelation(Vectorizer.LEN)
+            Decorrelation(Vectorizer.LEN, standardize=True)
         )
-        self.optimizers.append(optim.RMSprop(self.parameters()))
+        self.optimizers.append(optim.RMSprop(self.parameters(), lr=1e-3))
 
         for p in self._proposer.parameters():
             p.data.div_(10)
 
         initial_bias = Vectorizer.from_mapping_options(start_option)
+        initial_bias[initial_bias == Vectorizer.FROM_CLASS_INT] = 2
+        initial_bias[initial_bias == -Vectorizer.FROM_CLASS_INT] = -2
         initial_bias = torch.cat(tuple(repeat(initial_bias, num_proposals)))
         tuple(self._proposer.parameters())[-1].data = initial_bias
 
@@ -143,15 +155,17 @@ class Proposer(Module):
 class Evaluator(Module):
     __slots__ = ()
 
+    _HIDDEN_COEF = 3
+    _FEATURES = 16
+
     def __init__(self):
         super(Evaluator, self).__init__()
         self.guesser = nn.Sequential(
-            nn.Linear(in_features=Vectorizer.LEN, out_features=10 * Vectorizer.LEN),
-            nn.Dropout(),
+            nn.Linear(in_features=Vectorizer.LEN, out_features=self._HIDDEN_COEF * Vectorizer.LEN),
             nn.Tanh(),
-            nn.Linear(in_features=10 * Vectorizer.LEN, out_features=32),
-            Decorrelation(32),
-            nn.Linear(in_features=32, out_features=1))
+            nn.Linear(in_features=self._HIDDEN_COEF * Vectorizer.LEN, out_features=self._FEATURES),
+            Decorrelation(self._FEATURES),
+            nn.Linear(in_features=self._FEATURES, out_features=1))
 
         self.optimizers.append(optim.RMSprop(self.parameters()))
 
@@ -186,6 +200,8 @@ class Vectorizer:
     LOGGER = get_configured_logger('Vectorizer')
     LEN = sum(c for a, b, c in CONFIG)
 
+    FROM_CLASS_INT = 100
+
     @classmethod
     def to_bool(cls, t: Tensor) -> bool:
         t = t.view(-1)
@@ -194,8 +210,8 @@ class Vectorizer:
         return cls.to_class(t, (False, True))
 
     @classmethod
-    def to_ints(cls, t: Tensor) -> Sequence[int]:
-        return t.pow(2).round().long().tolist()
+    def to_positive_ints(cls, t: Tensor) -> Sequence[int]:
+        return t.pow(2).round().add(1).int().tolist()
 
     @classmethod
     def to_class(cls, t: Tensor, classes: Sequence[T]) -> T:
@@ -210,21 +226,24 @@ class Vectorizer:
         return cls.from_class(b, (True, False))
 
     @classmethod
-    def from_ints(cls, seq: Sequence[int]) -> Tensor:
-        assert all(i >= 0 for i in seq), f"seq = {seq}"
-        return Tensor(seq).sqrt_()
+    def from_positive_ints(cls, seq: Sequence[int]) -> Tensor:
+        assert all(i >= 1 for i in seq), f"seq = {seq}"
+        return Tensor(seq).add(-1).sqrt_()
 
     @classmethod
     def from_class(cls, this: T, classes: Sequence[T]) -> Tensor:
-        out = torch.zeros(len(classes)).fill_(-1e10)
-        out[classes.index(this)] = 1e10
+        out = torch.zeros(len(classes)).fill_(-cls.FROM_CLASS_INT)
+        out[classes.index(this)] = cls.FROM_CLASS_INT
         return out
 
     @staticmethod
-    def remove_trailing_zeros(seq):
-        if 0 not in seq:  # todo not continuous
+    def remove_trailing_ones(seq):
+        if len(seq) == 1:  # todo not continuous
             return seq
-        return seq[:seq.index(0)]
+        seq = list(seq)
+        while seq[-1] == 1 and len(seq) > 1:
+            seq.pop()
+        return seq
 
     @classmethod
     def to_mapping_options(cls, t: Tensor) -> tc.MappingOptions:
@@ -235,10 +254,10 @@ class Vectorizer:
             for attr, mytype, length in cls.CONFIG:
                 if mytype is int:
                     if length == 1:
-                        getattr(option, attr)(*cls.to_ints(t[start:start + length]))
+                        getattr(option, attr)(*cls.to_positive_ints(t[start:start + length]))
                     else:
                         getattr(option, attr)(  # todo discontinuity
-                            cls.remove_trailing_zeros(cls.to_ints(t[start:start + length])))
+                            cls.remove_trailing_ones(cls.to_positive_ints(t[start:start + length])))
                 else:
                     # assert isinstance(mytype, abc.Sequence), f"type(mytype) = {type(mytype)}"
                     getattr(option, attr)(cls.to_class(t[start:start + length], mytype))
@@ -261,7 +280,7 @@ class Vectorizer:
         def tensor_yielder():
             for attr, mytype, length in cls.CONFIG:
                 if mytype is int:
-                    out = cls.from_ints(
+                    out = cls.from_positive_ints(
                         (attr_dict[attr],) if isinstance(attr_dict[attr], int) else attr_dict[attr])
                     if len(out) < length:
                         out = torch.cat((out, torch.zeros(length - len(out))))

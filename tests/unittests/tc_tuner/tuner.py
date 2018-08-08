@@ -10,7 +10,6 @@ from tc_tuner.tuner import ChildTuner, Tuner
 from ..tc_tuner.message_bus import MessageBus
 from ..torch_test_case import TorchTestCase
 
-
 class TestWorker(TorchTestCase):
     def setUp(self):
         self.batch = 2
@@ -30,14 +29,18 @@ class TestWorker(TorchTestCase):
             msg_bus=msg_bus)
         worker.start()
 
+        opt_res = OptionResult.make_naive()
         for _ in range(num):
-            msg_bus.queue(OptionResult.make_naive())
+            msg_bus.queue(opt_res)
 
             while len(msg_bus._result) == 0 and worker.is_alive():
                 time.sleep(.1)
 
             opt_res = msg_bus.pop_result()
             self.assertIsInstance(opt_res.speed, float)
+
+        self.assertEqual(str(OptionResult(worker.current_opt).option),
+                         str(opt_res.option))
 
 
 class TestTuner(TorchTestCase):
@@ -54,12 +57,6 @@ class TestTuner(TorchTestCase):
         task = asyncio.ensure_future(tuner.evaluate_option(ts[0], opts[0]))
         task1 = asyncio.ensure_future(tuner.evaluate_option(ts[1], opts[1]))
 
-        def done_task(*x):
-            tuner._proposer.apply_grad()
-            tuner._evaluator.apply_grad()
-
-        task.add_done_callback(done_task)
-        task1.add_done_callback(done_task)
 
         settings.EVENT_LOOP.run_until_complete(asyncio.sleep(.3))
 
