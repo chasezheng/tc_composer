@@ -7,13 +7,13 @@ from collections import deque
 from functools import lru_cache
 from itertools import repeat
 from typing import Iterable, Tuple, TypeVar, Sequence, Any
-
+import os
 import tensor_comprehensions as tc
 import torch
 from torch import nn, Tensor, optim, autograd
 from torch.nn.functional import softmax
 
-from .settings import get_configured_logger
+from .settings import get_configured_logger, SAVE_DIR
 
 
 class Module(torch.nn.Module):
@@ -24,10 +24,16 @@ class Module(torch.nn.Module):
         self.optimizers = []
         self.loss = deque()
 
+        os.makedirs(self.report_dir, exist_ok=True)
+
     @property
     @lru_cache(maxsize=None)
     def logger(self) -> logging.Logger:
         return get_configured_logger(type(self).__name__)
+
+    @property
+    def report_dir(self):
+        return os.path.join(SAVE_DIR, 'modules', type(self).__name__)
 
     def _iterate_loss(self) -> Iterable[deque]:
         yield self.loss
@@ -61,15 +67,22 @@ class Module(torch.nn.Module):
         for _, m in self.named_sub():
             m.step()
 
+    def load(self, path: str = None):
+        path = path or os.path.join(self.report_dir, f'saved')
+        self.load_state_dict(torch.load(path))
 
-# todo save and load and tests
+    def save(self, path: str = None):
+        path = path or os.path.join(self.report_dir, f'saved')
+        torch.save(self.state_dict(), path)
+
+
 
 class Decorrelation(Module):
     __slots__ = '_2nd_moment', 'in_n', '_mean', '_standardize'
 
     def __init__(self, in_n: int,
                  standardize: bool = False,
-                 coef: float = 1e-4):
+                 coef: float = 1e-5):
         super(Decorrelation, self).__init__()
         self.in_n = in_n
         self._2nd_moment: Tensor = torch.zeros(1)
@@ -97,7 +110,7 @@ class Decorrelation(Module):
             self.logger.error(traceback.format_exc())
             pass
         else:
-            self.loss.append(d.pow(-1).neg().mul(self.coef))
+            self.loss.append(d.log().neg().mul(self.coef))
         finally:
             self._2nd_moment: Tensor = torch.zeros(1)
             self._mean: Tensor = torch.zeros(1)
@@ -129,14 +142,11 @@ class Proposer(Module):
             nn.Tanh(),
             nn.Linear(in_features=128, out_features=32),
             nn.Tanh(),
-            Decorrelation(32),
+            Decorrelation(32, coef=1e-5),
             nn.Linear(in_features=32, out_features=num_proposals * Vectorizer.LEN),
-            Decorrelation(Vectorizer.LEN, standardize=True)
+            Decorrelation(Vectorizer.LEN, standardize=True, coef=1e-6)
         )
-        self.optimizers.append(optim.RMSprop(self.parameters(), lr=1e-3))
-
-        for p in self._proposer.parameters():
-            p.data.div_(10)
+        self.optimizers.append(optim.RMSprop(self.parameters(), lr=1e-4))
 
         initial_bias = Vectorizer.from_mapping_options(start_option)
         initial_bias[initial_bias == Vectorizer.FROM_CLASS_INT] = 2
@@ -164,7 +174,7 @@ class Evaluator(Module):
             nn.Linear(in_features=Vectorizer.LEN, out_features=self._HIDDEN_COEF * Vectorizer.LEN),
             nn.Tanh(),
             nn.Linear(in_features=self._HIDDEN_COEF * Vectorizer.LEN, out_features=self._FEATURES),
-            Decorrelation(self._FEATURES),
+            Decorrelation(self._FEATURES, coef=1e-5),
             nn.Linear(in_features=self._FEATURES, out_features=1))
 
         self.optimizers.append(optim.RMSprop(self.parameters()))

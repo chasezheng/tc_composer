@@ -6,7 +6,7 @@ from tc_composer.func.affine_transform import AffineTransform
 from tc_tuner.async_queue import AsyncQueue
 from tc_tuner.modules import Vectorizer, Decorrelation, Evaluator, Proposer
 from ..torch_test_case import TorchTestCase
-
+import tempfile
 
 class TestVectorizer(TorchTestCase):
 
@@ -159,3 +159,31 @@ class TestProposerEvaluator(TorchTestCase):
                 self.assertGreater(get_grad(p), 0)
             except AssertionError:
                 self.logger.info(f'n={n}')
+
+    def test_save(self):
+        t, b = self.proposer(torch.randn(self.in_features))
+        with tempfile.NamedTemporaryFile() as tmp:
+            self.evaluator.save(tmp.name)
+
+            e = Evaluator()
+            e.load(tmp.name)
+
+            for p0, p1 in zip(self.evaluator.parameters(), e.parameters()):
+                self.assert_allclose(p0, p1)
+
+            self.assert_allclose(
+                e(t), self.evaluator(t)
+            )
+
+
+        with tempfile.NamedTemporaryFile() as tmp:
+            self.proposer.save(tmp.name)
+
+            p = Proposer(self.in_features)
+            p.load(tmp.name)
+
+            for p0, p1 in zip(self.proposer.parameters(), p.parameters()):
+                self.assert_allclose(p0, p1)
+
+            inp = torch.randn(self.in_features)
+            self.assert_allclose(p(inp), self.proposer(inp))

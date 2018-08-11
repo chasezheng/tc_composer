@@ -131,7 +131,7 @@ class ChildTuner(Worker):
 
 class Tuner:
     __slots__ = '_proposer', '_evaluator', '_f', '_inps', '_correct_outs', '_in_sizes', \
-                '_stats', '_make_options_async_config', '_save_result_config', '_msg_bus', '_tasks', \
+                '_stats', '_make_options_async_config', '_save_result_config', '_msg_bus', \
                 '_prediction_error', '_opt_res_persist'
 
     MAX_COMPILE_TIME = 180
@@ -161,7 +161,6 @@ class Tuner:
         self._save_result_config = [30, 1.001, 1 / 8]
 
         self._stats = TunerStats(name=name)
-        self._tasks = []
 
         self._prediction_error = 10
 
@@ -204,14 +203,6 @@ class Tuner:
         while True:
             stats.resource_usage()
             self._stats.gauge('prediction_error', self._prediction_error)
-
-            for t in tuple(self._tasks):
-                if t.cancelled():
-                    self._tasks.remove(t)
-                elif t.done():
-                    async_util.check_exception(t)
-                    self._tasks.remove(t)
-            self._stats.queue_size('tasks', len(self._tasks))
 
             await asyncio.sleep(.02)
 
@@ -294,19 +285,10 @@ class Tuner:
         for _ in range(num):
             out = await self.make_options()
             async_util.check_exception(house_keeping)
-
-            self._tasks.append(
-                asyncio.ensure_future(
-                    async_util.chain(
-                        asyncio.gather(*(self.evaluate_option(t, o) for t, o in out)),
-                        self._apply_grad())
-                )
-            )
-            await asyncio.sleep(.1)
+            await asyncio.gather(*(self.evaluate_option(t, o) for t, o in out))
+            await self._apply_grad()
+            self._stats.queue_passage('tasks')
             self._opt_res_persist.sync()
-
-        for t in tuple(self._tasks):
-            await t
 
     def run(self, num: int):
         main = asyncio.Task(self.main(num), loop=EVENT_LOOP)
