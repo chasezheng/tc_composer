@@ -1,4 +1,6 @@
 import os
+import pickle
+import tempfile
 
 import tensor_comprehensions as tc
 import torch
@@ -6,11 +8,23 @@ from torch import nn
 
 from tc_composer.func.activation import Activation, Softmax
 from tc_composer.func.affine_transform import AffineTransform
-from tc_composer.func.function_with_params import Composition, Branch, OptionNotFound
-from ..torch_test_case import TorchTestCase
+from tc_composer.func.function_with_params import Composition, Branch, OptionNotFound, FunctionWithParams
+from ...torch_test_case import TorchTestCase
 
 
-class TestFuncWithParams(TorchTestCase):
+class FuncTestCase(TorchTestCase):
+    def serialize_test(self, f: FunctionWithParams, inp: torch.Tensor):
+        with tempfile.NamedTemporaryFile() as tmp:
+            pickle.dump(f, tmp)
+            tmp.seek(0)
+            f2: FunctionWithParams = pickle.load(tmp)
+
+        f.recompile(inp)
+        f2.recompile(inp)
+        self.assert_allclose(f(inp), f2(inp))
+
+
+class TestFuncWithParams(FuncTestCase):
     def setUp(self):
         class TestActivation(Activation):
             # Like a copy of the class
@@ -83,8 +97,12 @@ class TestFuncWithParams(TorchTestCase):
         loaded = self.activation.get_options(self.inp, error_if_empty=True)
         self.assertEqual(option.serialize(), loaded.serialize())
 
+    def test_serialize(self):
+        self.serialize_test(AffineTransform(3, 4), torch.Tensor(2, 3))
 
-class TestComposition(TorchTestCase):
+
+
+class TestComposition(FuncTestCase):
     def setUp(self):
         batch_size = 2
         in_n = 3
@@ -137,8 +155,11 @@ class TestComposition(TorchTestCase):
             # Should pass in unique functions
             Composition(self.affine0, self.affine0)
 
+    def test_serialize(self):
+        self.serialize_test(self.comp, self.inp)
 
-class TestBranch(TorchTestCase):
+
+class TestBranch(FuncTestCase):
     def setUp(self):
         batch_size = 2
         in_n = 3
@@ -184,7 +205,7 @@ class TestBranch(TorchTestCase):
         added0.recompile(self.inp)
         added1.recompile(self.inp)
 
-        for x,y in zip(added0(self.inp), added1(self.inp)):
+        for x, y in zip(added0(self.inp), added1(self.inp)):
             self.assert_allclose(actual=x, desired=y)
 
     def test_commutivity(self):
@@ -210,3 +231,6 @@ class TestBranch(TorchTestCase):
         with self.assertRaises(AssertionError):
             # Should pass in unique functions
             Branch(self.affine0, self.affine0)
+
+    def test_serialize(self):
+        self.serialize_test(Branch(self.affine0, self.affine1), self.inp)

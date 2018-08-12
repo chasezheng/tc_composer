@@ -3,10 +3,10 @@ from torch.autograd import Variable
 from torch.nn import Conv2d
 
 from tc_composer.func.conv import Convolution
-from ..torch_test_case import TorchTestCase
+from .function_with_params import FuncTestCase
 
 
-class TestConv(TorchTestCase):
+class TestConv(FuncTestCase):
     RTOL = 1e-10
 
     def setUp(self):
@@ -33,10 +33,10 @@ class TestConv(TorchTestCase):
         torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
-
+        self.serialize_test(tc_conv, self.tc_image)
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
         torch_out = torch_conv(self.torch_image).squeeze()
@@ -61,10 +61,10 @@ class TestConv(TorchTestCase):
         torch_conv.weight.data.copy_(tc_conv.params[0].data.view_as(torch_conv.weight))
 
         tc_conv.recompile(self.tc_image)
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
-
+        self.serialize_test(tc_conv, self.tc_image)
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
         torch_out = torch_conv(self.torch_image).squeeze()
@@ -81,15 +81,9 @@ class TestConv(TorchTestCase):
                                  desired=torch.zeros(*tc_conv.bias.shape))"""
 
     def test_group(self):
-        groups = 3
-        tc_image = Variable(
-            torch.randn(self.batch_size, groups, self.in_channels, self.in_height, self.in_width),
-            requires_grad=True
-        )
-        torch_image = Variable(
-            torch.Tensor(self.batch_size, groups * self.in_channels, self.in_height, self.in_width),
-            requires_grad=True
-        )
+        groups = 4
+        tc_image = torch.randn(self.batch_size, groups, self.in_channels, self.in_height, self.in_width)
+        torch_image = torch.Tensor(self.batch_size, groups * self.in_channels, self.in_height, self.in_width)
         torch_image.data.copy_(tc_image.data.view_as(torch_image))
 
         tc_conv = Convolution(self.in_channels, self.out_channels, kernel_size=self.kernel_size, groups=groups)
@@ -100,10 +94,10 @@ class TestConv(TorchTestCase):
 
         tc_conv.recompile(tc_image)
 
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(tc_image).view(-1),
                              desired=torch_conv(torch_image).view(-1))
-
+        self.serialize_test(tc_conv, tc_image)
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(tc_image).view(-1)
         torch_out = torch_conv(torch_image).view(-1)
@@ -130,10 +124,10 @@ class TestConv(TorchTestCase):
         torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
-
+        self.serialize_test(tc_conv, self.tc_image)
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
         torch_out = torch_conv(self.torch_image).squeeze()
@@ -161,9 +155,10 @@ class TestConv(TorchTestCase):
         torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
+        self.serialize_test(tc_conv, self.tc_image)
 
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
@@ -193,10 +188,10 @@ class TestConv(TorchTestCase):
         torch_conv.bias.data.copy_(tc_conv.params[1].data.view_as(torch_conv.bias))
 
         tc_conv.recompile(self.tc_image)
-        #tc_conv.train(False), torch_conv.train(False)
+        # tc_conv.train(False), torch_conv.train(False)
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
-
+        self.serialize_test(tc_conv, self.tc_image)
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
         torch_out = torch_conv(self.torch_image).squeeze()

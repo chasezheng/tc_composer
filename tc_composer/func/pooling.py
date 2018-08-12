@@ -5,6 +5,8 @@ from ..unique_name import TensorName
 
 
 class AveragePooling(FunctionWithParams):  # todo dim
+    __slots__ = 'stride', 'kernel_size'
+
     def __init__(self, stride: Sequence[int], kernel_size: Sequence[int]):
 
         super(AveragePooling, self).__init__()
@@ -40,6 +42,8 @@ class AveragePooling(FunctionWithParams):  # todo dim
 
 
 class MaxPooling(FunctionWithParams):
+    __slots__ = 'stride', 'kernel_size'
+
     def __init__(self, stride: Sequence[int], kernel_size: Sequence[int]):
         super(MaxPooling, self).__init__()
         self.stride = stride

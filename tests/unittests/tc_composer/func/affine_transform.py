@@ -2,10 +2,9 @@ import torch
 from torch import nn
 
 from tc_composer.func.affine_transform import AffineTransform, FusedAffineTransform
-from ..torch_test_case import TorchTestCase
+from .function_with_params import FuncTestCase
 
-
-class TestAffineTransform(TorchTestCase):
+class TestAffineTransform(FuncTestCase):
     def setUp(self):
         self.batch_size = 3
         self.in_n = 10
@@ -22,6 +21,7 @@ class TestAffineTransform(TorchTestCase):
 
         tc_aff.recompile(self.input)
         self.assert_allclose(tc_aff(self.input).squeeze(), torch_aff(self.input).squeeze())
+        self.serialize_test(tc_aff, self.input)
 
     def test_without_bias(self):
         tc_aff = AffineTransform(in_n=self.in_n, out_n=self.out_n, bias=False)
@@ -31,9 +31,10 @@ class TestAffineTransform(TorchTestCase):
 
         tc_aff.recompile(self.input)
         self.assert_allclose(tc_aff(self.input).squeeze(), torch_aff(self.input).squeeze())
+        self.serialize_test(tc_aff, self.input)
 
 
-class TestFusedAffineTransform(TorchTestCase):
+class TestFusedAffineTransform(FuncTestCase):
     def setUp(self):
         self.batch_size = 2
         self.in_n = 3
@@ -67,3 +68,4 @@ class TestFusedAffineTransform(TorchTestCase):
             p.data = t.detach().view_as(p)
 
         self.assert_allclose(actual=tc_aff(self.input), desired=torch_aff(self.input))
+        self.serialize_test(tc_aff, self.input)
