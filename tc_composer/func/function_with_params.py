@@ -172,7 +172,7 @@ class FunctionWithParams(metaclass=ABCMeta):
             return tc.MappingOptions('naive')
         else:
             self.logger.info(
-                f'OptionResult loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
+                f'Option loaded from file for input shape - {list(tuple(i.shape) for i in inputs)}.')
             return loaded[0]
 
     def recompile(self, *inputs: Tensor, option: tc.MappingOptions = None) -> None:
@@ -265,7 +265,7 @@ class Branch(FunctionWithParams):
                 try:
                     yield f.def_components(in_names=in_names)
                 except:
-                    self.logger.error(f'n = {n}, f = {f.entry_point}')  # todo implement and use repr
+                    self.logger.error(f'n = {n}, f = {f.entry_point}')
                     raise
 
         results = tuple(components_yielder())

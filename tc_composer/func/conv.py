@@ -116,22 +116,22 @@ class Convolution(FunctionWithParams):  # todo dilation, different dimensions
         output_h_constraint = f"h in 0:{output_h_upper_bound}"
         output_w_constraint = f"w in 0:{output_w_upper_bound}"
 
+        input_h_mask_cond = f"(({input_h_index}) * ({H.sub(1)} - ({input_h_index})) >= 0)"
+        input_w_mask_cond = f"(({input_w_index}) * ({W.sub(1)} - ({input_w_index})) >= 0)"
+        conds = (input_h_mask_cond, input_w_mask_cond)
+        masks = (c for c,p in zip(conds, self.padding) if p > 0)
+
         g_ = 'g, ' if self.groups > 1 else ''
         forward = (
-                f"{output}(n, {g_}m, h, w) +=! {input}(n, {g_}c, " +
-                (f"max(min({input_h_index}, {H.sub(1)}), 0)" if self.padding[0] > 0 else input_h_index) + ', ' +
-                (f"max(min({input_w_index}, {W.sub(1)}), 0)" if self.padding[1] > 0 else input_w_index) +
-                f") "
-                f"* {weight}({g_}m, c, kh, kw) \n" +
+                f"{output}(n, {g_}m, h, w) +=! " +
                 (
-                    f"                              * fmin(1.0, fmax(0.0, (1 + {input_h_index}) * ({H} - ({input_h_index}))))\n" if
-                    self.padding[0] > 0 else '') +  # Setting zero at the padding boundaries.
-                (
-                    f"                              * fmin(1.0, fmax(0.0, (1 + {input_w_index}) * ({W} - ({input_w_index}))))\n" if
-                    self.padding[1] > 0 else '') +
-                f"    where kh in 0:{KH}, kw in 0:{KW}, {output_h_constraint}, {output_w_constraint}\n" +
-                (f"{output}(n, {g_}m, h, w) = {output}(n, {g_}m, h, w) + {bias}({g_}m)\n"
-                 f"" if self.use_bias else ''))
+                    ' && '.join(masks) + ' ?\n' if any(n > 0 for n in self.padding) else ''
+                ) +
+                f"    {input}(n, {g_}c, {input_h_index}, {input_w_index}) * {weight}({g_}m, c, kh, kw)" +
+                (" : 0.0\n" if any(n > 0 for n in self.padding) else '\n') +
+                f"        where kh in 0:{KH}, kw in 0:{KW}, {output_h_constraint}, {output_w_constraint}" +
+                (f"\n"
+                 f"{output}(n, {g_}m, h, w) = {output}(n, {g_}m, h, w) + {bias}({g_}m)" if self.use_bias else ''))
 
         return forward, (input,), (output,), ()
 

@@ -159,6 +159,7 @@ class TestConv(FuncTestCase):
         self.assert_allclose(actual=tc_conv(self.tc_image).squeeze(),
                              desired=torch_conv(self.torch_image).squeeze())
         self.serialize_test(tc_conv, self.tc_image)
+
         """tc_conv.train(True), torch_conv.train(True)
         tc_out = tc_conv(self.tc_image).squeeze()
         torch_out = torch_conv(self.torch_image).squeeze()
