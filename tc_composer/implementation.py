@@ -11,22 +11,14 @@ class AlexNet(FunctionWithParams):
     @property
     @lru_cache(maxsize=None)
     def named_params(self):
-        return TensorName.make_pair(sizes=(64, 3, 11, 11), prefix='weight'), TensorName.make_pair(sizes=(64,),
-                                                                                                  prefix='bias'), \
-               TensorName.make_pair(sizes=(192, 64, 5, 5), prefix='weight'), TensorName.make_pair(
-            sizes=(192,), prefix='bias'), \
-               TensorName.make_pair(sizes=(384, 192, 3, 3), prefix='weight'), TensorName.make_pair(
-            sizes=(384,), prefix='bias'), \
-               TensorName.make_pair(sizes=(256, 384, 3, 3), prefix='weight'), TensorName.make_pair(
-            sizes=(256,), prefix='bias'), \
-               TensorName.make_pair(sizes=(256, 256, 3, 3), prefix='weight'), TensorName.make_pair(
-            sizes=(256,), prefix='bias'), \
-               TensorName.make_pair(sizes=(4096, 9216), prefix='weight'), TensorName.make_pair(sizes=(4096,),
-                                                                                               prefix='bias'), \
-               TensorName.make_pair(sizes=(4096, 4096), prefix='weight'), TensorName.make_pair(sizes=(4096,),
-                                                                                               prefix='bias'), \
-               TensorName.make_pair(sizes=(1000, 4096), prefix='weight'), TensorName.make_pair(sizes=(1000,),
-                                                                                               prefix='bias')
+        return TensorName.make_pair(sizes=(64, 3, 11, 11), prefix='weight'), TensorName.make_pair(sizes=(64,), prefix='bias'), \
+               TensorName.make_pair(sizes=(192, 64, 5, 5), prefix='weight'), TensorName.make_pair(sizes=(192,), prefix='bias'), \
+               TensorName.make_pair(sizes=(384, 192, 3, 3), prefix='weight'), TensorName.make_pair(sizes=(384,), prefix='bias'), \
+               TensorName.make_pair(sizes=(256, 384, 3, 3), prefix='weight'), TensorName.make_pair(sizes=(256,), prefix='bias'), \
+               TensorName.make_pair(sizes=(256, 256, 3, 3), prefix='weight'), TensorName.make_pair(sizes=(256,), prefix='bias'), \
+               TensorName.make_pair(sizes=(4096, 9216), prefix='weight'), TensorName.make_pair(sizes=(4096,), prefix='bias'), \
+               TensorName.make_pair(sizes=(4096, 4096), prefix='weight'), TensorName.make_pair(sizes=(4096,), prefix='bias'), \
+               TensorName.make_pair(sizes=(1000, 4096), prefix='weight'), TensorName.make_pair(sizes=(1000,), prefix='bias')
 
     def def_components(self, in_names: Sequence[TensorName] = None):
         if in_names is not None:
